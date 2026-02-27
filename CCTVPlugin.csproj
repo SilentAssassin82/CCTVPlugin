@@ -1,0 +1,118 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <UseWpf>true</UseWpf>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <LangVersion>latest</LangVersion>
+    <OutputPath>C:\Torch\Plugins\CCTVPlugin\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>AnyCPU;x64</Platforms>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="CCTVMod\**" />
+    <EmbeddedResource Remove="CCTVMod\**" />
+    <None Remove="CCTVMod\**" />
+    <None Remove="UI\CCTVPluginControl.xaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Page Include="UI\CCTVPluginControl.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="CCTVMod\Data\Scripts\CCTVCameraController.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Torch assemblies - don't copy, they're already in Torch -->
+    <Reference Include="NLog">
+      <HintPath>C:\Torch\NLog.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Sandbox.Game">
+      <HintPath>G:\SteamLibrary\steamapps\common\SpaceEngineersDedicatedServer\DedicatedServer64\Sandbox.Game.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Torch">
+      <HintPath>C:\Torch\Torch.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Space Engineers server assemblies - don't copy, they're already in Torch -->
+    <Reference Include="Sandbox.Common">
+      <HintPath>C:\Torch\DedicatedServer64\Sandbox.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SpaceEngineers.Game">
+      <HintPath>C:\Torch\DedicatedServer64\SpaceEngineers.Game.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Torch.API">
+      <HintPath>..\..\..\..\..\..\..\Torch\Torch.API.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- VRage assemblies - don't copy, they're already in Torch -->
+    <Reference Include="VRage">
+      <HintPath>C:\Torch\DedicatedServer64\VRage.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VRage.Game">
+      <HintPath>G:\SteamLibrary\steamapps\common\SpaceEngineersDedicatedServer\DedicatedServer64\VRage.Game.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VRage.Game.XmlSerializers">
+      <HintPath>G:\SteamLibrary\steamapps\common\SpaceEngineersDedicatedServer\DedicatedServer64\VRage.Game.XmlSerializers.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VRage.Library">
+      <HintPath>C:\Torch\DedicatedServer64\VRage.Library.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VRage.Math">
+      <HintPath>G:\SteamLibrary\steamapps\common\SpaceEngineersDedicatedServer\DedicatedServer64\VRage.Math.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Add reference to new CCTVCommon project (sibling folder) -->
+  <ItemGroup>
+    <ProjectReference Include="CCTVCommon\CCTVCommon.csproj" />
+  </ItemGroup>
+
+  <!-- Copy manifest.xml to output -->
+  <ItemGroup>
+    <None Include="CCTVMod\metadata.mod" />
+    <None Include="CCTVMod\modinfo.sbm" />
+    <None Include="CCTVTester\CCTVTester.csproj" />
+    <None Include="CCTVCapture\CCTVCapture.csproj" />
+    <None Include="manifest.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="UI\CCTVPluginControl.xaml">
+      <Generator>MSBuild:Compile</Generator>
+    </None>
+  </ItemGroup>
+
+  <!-- Post-build: Copy CCTVCommon.dll to CCTVCapture output folders -->
+  <Target Name="CopyCCTVCommonToClient" AfterTargets="Build">
+    <Message Text="Copying CCTVCommon.dll to CCTVCapture output directories..." Importance="high" />
+
+    <!-- Copy to Debug folder -->
+    <Copy SourceFiles="$(OutputPath)CCTVCommon.dll" 
+          DestinationFolder="CCTVCapture\bin\x64\Debug\" 
+          SkipUnchangedFiles="true" />
+
+    <!-- Copy to Release folder -->
+    <Copy SourceFiles="$(OutputPath)CCTVCommon.dll" 
+          DestinationFolder="CCTVCapture\bin\Release\net48\" 
+          SkipUnchangedFiles="true" />
+
+    <Message Text="✅ CCTVCommon.dll copied successfully!" Importance="high" />
+  </Target>
+</Project>

@@ -1,0 +1,151 @@
+﻿<UserControl x:Class="CCTVPlugin.CCTVPluginControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="10">
+            <TextBlock Text="CCTV Plugin Settings" FontWeight="Bold" FontSize="16" Margin="0,0,0,15"/>
+
+            <!-- Account -->
+            <TextBlock Text="Account" FontWeight="Bold" Margin="0,0,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Spectator SteamID:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="200" Text="{Binding SpectatorSteamId, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <Separator Margin="0,10"/>
+
+            <!-- Naming -->
+            <TextBlock Text="Naming" FontWeight="Bold" Margin="0,10,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Camera Prefix:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="200" Text="{Binding CameraPrefix, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="LCD Prefix:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="200" Text="{Binding LcdPrefix, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <Separator Margin="0,10"/>
+
+            <!-- Capture Settings -->
+            <TextBlock Text="Capture" FontWeight="Bold" Margin="0,10,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Resolution Width:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding CaptureWidth, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="  (64-512)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Resolution Height:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding CaptureHeight, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="  (64-512)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="LCD Render Resolution:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="64" Maximum="362" Value="{Binding LcdGridResolution}"
+                        TickFrequency="2" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding LcdGridResolution, StringFormat={}{0}px}" Width="45" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (grid max 362px, single = half)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Capture FPS:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding CaptureFps, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="  (1-30)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Display FPS:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding DisplayFps, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="  (1-10, lower = smoother buffering)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Color Mode:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding UseColorMode}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (512-color SE palette)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Enable Dithering:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding UseDithering}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (smoother gradients, works in color and grayscale)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Post-Processing:" Width="160" VerticalAlignment="Center"/>
+                <ComboBox Width="150" SelectedValue="{Binding PostProcessMode}" SelectedValuePath="Content" VerticalAlignment="Center">
+                    <ComboBoxItem Content="None"/>
+                    <ComboBoxItem Content="LightBlur"/>
+                    <ComboBoxItem Content="MediumBlur"/>
+                    <ComboBoxItem Content="Sharpen"/>
+                </ComboBox>
+                <TextBlock Text="  (pre-filter before ASCII)" Foreground="Gray" VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </StackPanel>
+            <Separator Margin="0,10"/>
+
+            <!-- Display -->
+            <TextBlock Text="Display" FontWeight="Bold" Margin="0,10,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="LCD Font Tint (R,G,B):" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="120" Text="{Binding LcdFontTint, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Font Scale:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="0.05" Maximum="2.0" Value="{Binding FontScale}" 
+                        TickFrequency="0.05" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding FontScale, StringFormat={}{0:F2}x}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (adjust character size)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Auto-Adjust Font:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding AutoAdjustFontSize}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (scale font based on resolution)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Grid Font Size:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="0.05" Maximum="0.15" Value="{Binding GridFontSize}" 
+                        TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding GridFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (2×2 grid alignment)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <Separator Margin="0,10"/>
+
+            <!-- Cycling -->
+            <TextBlock Text="Camera Cycling" FontWeight="Bold" Margin="0,10,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Auto Cycle:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding EnableAutoCameraCycling}" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Cycle Interval (sec):" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding CameraCycleIntervalSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <Separator Margin="0,10"/>
+
+            <!-- Advanced -->
+            <TextBlock Text="Advanced" FontWeight="Bold" Margin="0,10,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Multi-Client Mode:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding UseMultiClientMode}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (enable multiple CCTVCapture instances)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <TextBlock Text="(Edit CCTVPlugin.cfg to configure multiple instances)" 
+                       Foreground="Orange" FontSize="10" Margin="165,0,0,5"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="TCP Port:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding TcpPort, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="  (legacy single-client only)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Camera Rescan Ticks:" Width="160" VerticalAlignment="Center"/>
+                <TextBox Width="80" Text="{Binding CameraRescanTicks, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Enable Heartbeat:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding EnableHeartbeat}" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Verbose Frame Logging:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding EnableVerboseFrameLogging}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (show [FRAME] messages at INFO level)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+
+            <Button Content="Save" Width="100" Margin="0,20,0,0" HorizontalAlignment="Left"
+                    Click="OnSaveClick"/>
+            <TextBlock x:Name="SaveStatus" Foreground="Green" Margin="0,5,0,0"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

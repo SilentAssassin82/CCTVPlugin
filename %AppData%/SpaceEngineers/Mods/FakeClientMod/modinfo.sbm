@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<Definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Definition xsi:type="MyObjectBuilder_ModInfo">
+    <Id>
+      <WorkshopId>0</WorkshopId>
+    </Id>
+    <Name>CCTV Spectator Controller</Name>
+    <Description>Controls spectator camera for CCTV system using multiplayer messaging. No character needed - pure spectator mode!</Description>
+    <WorkshopId>0</WorkshopId>
+    <Version>2.0</Version>
+  </Definition>
+</Definitions>

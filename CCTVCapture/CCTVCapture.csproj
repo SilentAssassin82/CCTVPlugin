@@ -1,0 +1,57 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- System.Drawing for screen capture (already in .NET Framework) -->
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <!-- Reference to shared CCTVCommon project -->
+  <ItemGroup>
+    <ProjectReference Include="..\CCTVCommon\CCTVCommon.csproj">
+      <Private>true</Private>
+      <CopyLocalSatelliteAssemblies>false</CopyLocalSatelliteAssemblies>
+    </ProjectReference>
+  </ItemGroup>
+
+  <!-- Ensure CCTVCommon.dll is always copied to output -->
+  <Target Name="CopyCCTVCommonDll" AfterTargets="Build">
+    <Message Importance="high" Text="Copying CCTVCommon.dll to output directory..." />
+    <Copy SourceFiles="$(OutDir)\CCTVCommon.dll" 
+          DestinationFolder="$(OutDir)" 
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)\CCTVCommon.dll')" />
+  </Target>
+
+  <!-- Auto-copy to DEPLOY folder after every build -->
+  <Target Name="CopyToDeploy" AfterTargets="Build">
+    <PropertyGroup>
+      <DeployFolder>$(ProjectDir)..\DEPLOY\</DeployFolder>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="📦 Copying CCTVCapture.exe and CCTVCommon.dll to DEPLOY folder..." />
+
+    <!-- Create DEPLOY folder if it doesn't exist -->
+    <MakeDir Directories="$(DeployFolder)" Condition="!Exists('$(DeployFolder)')" />
+
+    <!-- Copy CCTVCapture.exe -->
+    <Copy SourceFiles="$(OutDir)\CCTVCapture.exe" 
+          DestinationFolder="$(DeployFolder)" 
+          SkipUnchangedFiles="false"
+          Condition="Exists('$(OutDir)\CCTVCapture.exe')" />
+
+    <!-- Copy CCTVCommon.dll -->
+    <Copy SourceFiles="$(OutDir)\CCTVCommon.dll" 
+          DestinationFolder="$(DeployFolder)" 
+          SkipUnchangedFiles="false"
+          Condition="Exists('$(OutDir)\CCTVCommon.dll')" />
+
+    <Message Importance="high" Text="✅ CCTVCapture.exe and CCTVCommon.dll copied to DEPLOY\" />
+  </Target>
+</Project>

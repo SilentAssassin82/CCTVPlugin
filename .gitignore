@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+
+# Proprietary SE/Torch reference DLLs (not redistributable - obtain from your local SE/Torch install)
+net48/
+
+# Compiled plugin output
+*.dll
+*.pdb
+*.exe
+
+# Visual Studio
+*.user
+*.suo
+*.Backup.tmp
+.vs/
+*.cache
+
+# Live config (may contain real Steam IDs, ports, server info)
+*.cfg
+
+# NuGet
+*.nupkg
+packages/

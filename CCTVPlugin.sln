@@ -1,0 +1,70 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.3.11505.172
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CCTVPlugin", "CCTVPlugin.csproj", "{A409AFEE-617C-14F0-B031-4F8D3F2189B9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CCTVCommon", "CCTVCommon\CCTVCommon.csproj", "{30622D2E-F7DF-799A-3CC3-6BE92638327F}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "CCTVCapture", "CCTVCapture", "{13DE9A82-3BAD-158C-9E34-D5ADCAB2CC74}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CCTVCapture", "CCTVCapture\\CCTVCapture.csproj", "{2D110B9F-8419-41DA-89E5-254CEDE037CE}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|Any CPU = Release|Any CPU
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Debug|x64.ActiveCfg = Release|x64
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Debug|x64.Build.0 = Release|x64
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Debug|x86.Build.0 = Debug|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Release|x64.ActiveCfg = Release|x64
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Release|x64.Build.0 = Release|x64
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Release|x86.ActiveCfg = Release|Any CPU
+		{A409AFEE-617C-14F0-B031-4F8D3F2189B9}.Release|x86.Build.0 = Release|Any CPU
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Debug|Any CPU.ActiveCfg = Debug|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Debug|Any CPU.Build.0 = Debug|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Debug|x64.ActiveCfg = Debug|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Debug|x64.Build.0 = Debug|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Debug|x86.Build.0 = Debug|Any CPU
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Release|Any CPU.ActiveCfg = Release|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Release|Any CPU.Build.0 = Release|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Release|x64.ActiveCfg = Release|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Release|x64.Build.0 = Release|x64
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Release|x86.ActiveCfg = Release|Any CPU
+		{30622D2E-F7DF-799A-3CC3-6BE92638327F}.Release|x86.Build.0 = Release|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Debug|x64.ActiveCfg = Debug|x64
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Debug|x64.Build.0 = Debug|x64
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Debug|x86.Build.0 = Debug|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Release|x64.ActiveCfg = Release|x64
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Release|x64.Build.0 = Release|x64
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Release|x86.ActiveCfg = Release|Any CPU
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE}.Release|x86.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{2D110B9F-8419-41DA-89E5-254CEDE037CE} = {13DE9A82-3BAD-158C-9E34-D5ADCAB2CC74}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {C24357AB-B39E-4616-A509-ACE334CCA798}
+	EndGlobalSection
+EndGlobal

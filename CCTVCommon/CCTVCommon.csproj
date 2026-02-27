@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <RootNamespace>CCTVCommon</RootNamespace>
+    <AssemblyName>CCTVCommon</AssemblyName>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+  </PropertyGroup>
+
+  <Target Name="PostBuildCopyToCCTVPlugin" AfterTargets="Build">
+    <PropertyGroup>
+      <CCTVPluginOutput>C:\Torch\Plugins\CCTVPlugin\</CCTVPluginOutput>
+      <CCTVCaptureDebugOutput>..\CCTVCapture\bin\x64\Debug\</CCTVCaptureDebugOutput>
+      <CCTVCaptureReleaseOutput>..\CCTVCapture\bin\Release\net48\</CCTVCaptureReleaseOutput>
+    </PropertyGroup>
+
+    <Message Text="============================================" Importance="high" />
+    <Message Text="?? COPYING CCTVCommon.dll TO ALL LOCATIONS..." Importance="high" />
+    <Message Text="============================================" Importance="high" />
+
+    <!-- Copy to Torch Plugin folder -->
+    <MakeDir Directories="$(CCTVPluginOutput)" Condition="!Exists('$(CCTVPluginOutput)')" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(CCTVPluginOutput)" SkipUnchangedFiles="false" />
+    <Message Text="? Copied to: $(CCTVPluginOutput)" Importance="high" />
+
+    <!-- Copy to CCTVCapture Debug folder -->
+    <MakeDir Directories="$(CCTVCaptureDebugOutput)" Condition="!Exists('$(CCTVCaptureDebugOutput)')" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(CCTVCaptureDebugOutput)" SkipUnchangedFiles="false" />
+    <Message Text="? Copied to: $(CCTVCaptureDebugOutput)" Importance="high" />
+
+    <!-- Copy to CCTVCapture Release folder -->
+    <MakeDir Directories="$(CCTVCaptureReleaseOutput)" Condition="!Exists('$(CCTVCaptureReleaseOutput)')" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(CCTVCaptureReleaseOutput)" SkipUnchangedFiles="false" />
+    <Message Text="? Copied to: $(CCTVCaptureReleaseOutput)" Importance="high" />
+
+    <Message Text="============================================" Importance="high" />
+    <Message Text="? CCTVCommon.dll DEPLOYED TO 3 LOCATIONS!" Importance="high" />
+    <Message Text="============================================" Importance="high" />
+  </Target>
+</Project>

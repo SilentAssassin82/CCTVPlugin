@@ -1,0 +1,10 @@
+﻿<?xml version="1.0"?>
+<PluginManifest>
+  <Name>CCTVPlugin</Name>
+  <Guid>12345678-1234-1234-1234-123456789ABC</Guid>
+  <Version>1.0.0</Version>
+  <Description>Fake Client Controller - Remote camera control via TCP</Description>
+  <Author>Chris</Author>
+  <Repository>https://github.com/yourusername/CCTVPlugin</Repository>
+  <Dependencies />
+</PluginManifest>
