@@ -415,6 +415,10 @@ namespace CCTVPlugin
 
 				Log.Info($"[{Name}] Client disconnected");
 			}
+			catch (IOException ex) when (ex.InnerException is SocketException)
+			{
+				Log.Info($"[{Name}] Client disconnected (connection forcibly closed)");
+			}
 			catch (Exception ex)
 			{
 				Log.Error(ex, $"[{Name}] Error in client handler thread");
