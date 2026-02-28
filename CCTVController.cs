@@ -1110,7 +1110,7 @@ namespace CCTVPlugin
                     else if (processedFrame.IsSingleLcdFrame && lcdInfo.HasSingleLcd)
                     {
                         // Single LCD frame - write directly
-                        WriteToPanelGrid(lcdInfo.SingleLcd, processedFrame.DecodedAscii, processedFrame.Mode, 
+                        WriteToPanelGrid(lcdInfo.SingleLcd, processedFrame.DecodedAscii, processedFrame.Mode,
                                                processedFrame.Width, processedFrame.Height, processedFrame.CameraEntityId, "SINGLE");
                     }
                     else
@@ -1317,7 +1317,7 @@ namespace CCTVPlugin
                     else if (!string.IsNullOrEmpty(frame.AsciiData))
                     {
                         // In color mode, ANSI escape codes can't be safely downsampled
-                            if (frame.Mode.IndexOf("COLOR", StringComparison.OrdinalIgnoreCase) >= 0 && (frame.Width > singleSize || frame.Height > singleSize))
+                        if (frame.Mode.IndexOf("COLOR", StringComparison.OrdinalIgnoreCase) >= 0 && (frame.Width > singleSize || frame.Height > singleSize))
                         {
                             Log.Debug($"[SINGLE LCD] Skipping color frame {frame.Width}×{frame.Height} - no dedicated single LCD frame available");
                         }
@@ -1755,8 +1755,8 @@ namespace CCTVPlugin
                     // Report slave count
                     if (result.HasSlaves)
                     {
-                        int totalSlaves = result.SlaveSingle.Count + result.SlaveTopLeft.Count + 
-                                         result.SlaveTopRight.Count + result.SlaveBottomLeft.Count + 
+                        int totalSlaves = result.SlaveSingle.Count + result.SlaveTopLeft.Count +
+                                         result.SlaveTopRight.Count + result.SlaveBottomLeft.Count +
                                          result.SlaveBottomRight.Count;
                         Log.Info($"📡 Found {totalSlaves} SLAVE LCDs - will copy from master (efficient!)");
                     }
@@ -2426,8 +2426,8 @@ namespace CCTVPlugin
 
             public bool HasGridMode => TopLeft != null && TopRight != null && BottomLeft != null && BottomRight != null;
 
-            public bool HasSlaves => SlaveSingle.Count > 0 || SlaveTopLeft.Count > 0 || 
-                                     SlaveTopRight.Count > 0 || SlaveBottomLeft.Count > 0 || 
+            public bool HasSlaves => SlaveSingle.Count > 0 || SlaveTopLeft.Count > 0 ||
+                                     SlaveTopRight.Count > 0 || SlaveBottomLeft.Count > 0 ||
                                      SlaveBottomRight.Count > 0;
 
             public bool IsValid()

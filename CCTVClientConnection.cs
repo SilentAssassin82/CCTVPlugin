@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using CCTVCommon;
@@ -283,14 +284,58 @@ namespace CCTVPlugin
                 {
                     if (_listener.Pending())
                     {
-                        _client = _listener.AcceptTcpClient();
+                        var candidate = _listener.AcceptTcpClient();
 
-                        // 🔧 CRITICAL FIX: Increase buffer sizes for large FRAME messages (500KB+)
-                        _client.ReceiveBufferSize = 1024 * 1024; // 1 MB receive buffer
-                        _client.SendBufferSize = 1024 * 1024;    // 1 MB send buffer
-                        _client.NoDelay = true; // Disable Nagle's algorithm for faster sends
+                        candidate.ReceiveBufferSize = 1024 * 1024;
+                        candidate.SendBufferSize = 1024 * 1024;
+                        candidate.NoDelay = true;
 
-                        _stream = _client.GetStream();
+                        var candidateStream = candidate.GetStream();
+
+                        // --- HMAC challenge-response handshake ---
+                        // Generate a random nonce, send it with HELLO, expect AUTH <hmac>
+                        string nonce = Guid.NewGuid().ToString("N");
+                        byte[] nonceBytes = Encoding.UTF8.GetBytes(nonce);
+                        byte[] keyBytes   = Encoding.UTF8.GetBytes(BuildToken.Value);
+                        string expectedHmac;
+                        using (var hmac = new HMACSHA256(keyBytes))
+                            expectedHmac = Convert.ToBase64String(hmac.ComputeHash(nonceBytes));
+
+                        byte[] helloBytes = Encoding.UTF8.GetBytes($"HELLO {Name} v1.0 CHALLENGE:{nonce}\n");
+                        candidateStream.Write(helloBytes, 0, helloBytes.Length);
+                        candidateStream.Flush();
+
+                        // Read AUTH response (with 5-second timeout)
+                        candidate.ReceiveTimeout = 5000;
+                        string authLine = null;
+                        try
+                        {
+                            using (var tempReader = new StreamReader(candidateStream, Encoding.UTF8, false, 256, leaveOpen: true))
+                                authLine = tempReader.ReadLine();
+                        }
+                        catch (Exception)
+                        {
+                            Log.Warn($"[{Name}] ⛔ Client failed to respond to auth challenge — disconnected");
+                            candidate.Close();
+                            continue;
+                        }
+                        finally
+                        {
+                            candidate.ReceiveTimeout = 0; // reset to infinite
+                        }
+
+                        if (authLine == null || !authLine.StartsWith("AUTH ") || authLine.Substring(5).Trim() != expectedHmac)
+                        {
+                            Log.Warn($"[{Name}] ⛔ Auth failed — unexpected or missing AUTH response — disconnected");
+                            candidate.Close();
+                            continue;
+                        }
+
+                        Log.Info($"[{Name}] ✅ Auth passed — CCTVCapture verified");
+                        // --- end handshake ---
+
+                        _client = candidate;
+                        _stream = candidateStream;
 
                         Log.Info($"✅ [{Name}] CCTVCapture connected from {_client.Client.RemoteEndPoint}");
 

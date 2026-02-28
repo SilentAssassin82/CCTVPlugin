@@ -77,6 +77,31 @@ namespace CCTVCapture
 
                 Console.WriteLine("Connected to Torch plugin!");
 
+                // --- HMAC challenge-response handshake ---
+                // Read HELLO which contains the nonce: "HELLO <name> v1.0 CHALLENGE:<nonce>"
+                string hello = _reader.ReadLine();
+                Console.WriteLine($"<< {hello}");
+                string nonce = null;
+                if (hello != null)
+                {
+                    int idx = hello.IndexOf("CHALLENGE:", StringComparison.Ordinal);
+                    if (idx >= 0)
+                        nonce = hello.Substring(idx + 10).Trim();
+                }
+                if (nonce == null)
+                {
+                    Console.WriteLine("❌ No challenge received — server may be outdated or untrusted. Disconnecting.");
+                    return;
+                }
+                byte[] nonceBytes = System.Text.Encoding.UTF8.GetBytes(nonce);
+                byte[] keyBytes   = System.Text.Encoding.UTF8.GetBytes(CCTVCommon.BuildToken.Value);
+                string hmacResponse;
+                using (var hmac = new System.Security.Cryptography.HMACSHA256(keyBytes))
+                    hmacResponse = Convert.ToBase64String(hmac.ComputeHash(nonceBytes));
+                _writer.WriteLine($"AUTH {hmacResponse}");
+                Console.WriteLine(">> AUTH sent");
+                // --- end handshake ---
+
                 // Test connection
                 _writer.WriteLine("PING");
                 string response = _reader.ReadLine();  // reads PONG
