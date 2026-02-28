@@ -4,6 +4,7 @@ using VRage.Game.Components;
 using VRageMath;
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace CCTVMod
 {
@@ -15,7 +16,8 @@ namespace CCTVMod
     [MySessionComponentDescriptor(MyUpdateOrder.AfterSimulation)]
     public class CCTVCameraController : MySessionComponentBase
     {
-        private const ushort MESSAGE_ID = 12346; // Unique message ID for CCTV system
+        private const ushort MESSAGE_ID = 12346; // server → client: GOTO / spectator control
+        private const ushort CTRL_MESSAGE_ID = 12347; // client → server: button control
         
         private readonly Dictionary<string, Vector3D> _cameraPositions = new Dictionary<string, Vector3D>();
         private readonly Queue<Action> _gameThreadActions = new Queue<Action>();
@@ -35,12 +37,52 @@ namespace CCTVMod
             {
                 // Register multiplayer message handler (ALLOWED by sandbox!)
                 MyAPIGateway.Multiplayer.RegisterMessageHandler(MESSAGE_ID, OnMessageReceived);
-                
+
+                // Register in-game button actions on button panels
+                RegisterCameraControlActions();
+
                 _isInitialized = true;
             }
             catch (Exception)
             {
             }
+        }
+
+        /// <summary>
+        /// Adds three terminal actions to all Button Panel blocks so players can assign
+        /// them to buttons in the button panel toolbar.
+        /// The button panel's CustomData must be set to the LiveFeedLcdName (e.g. "Test01").
+        /// </summary>
+        private void RegisterCameraControlActions()
+        {
+            try
+            {
+                CreateCamCtrlAction("CCTV_Next",  "CCTV: Next Camera",  "NEXT");
+                CreateCamCtrlAction("CCTV_Prev",  "CCTV: Prev Camera",  "PREV");
+                CreateCamCtrlAction("CCTV_Reset", "CCTV: Reset Cycle",  "RESET");
+            }
+            catch (Exception) { }
+        }
+
+        private void CreateCamCtrlAction(string id, string label, string cmd)
+        {
+            var action = MyAPIGateway.TerminalControls.CreateAction<IMyButtonPanel>(id);
+            action.Name = new StringBuilder(label);
+            action.ValidForGroups = false;
+            action.Action = (block) =>
+            {
+                if (MyAPIGateway.Session.IsServer && MyAPIGateway.Utilities.IsDedicated)
+                    return;
+
+                string lcdName = (block.CustomData ?? "").Trim();
+                if (string.IsNullOrEmpty(lcdName))
+                    return;
+
+                byte[] data = Encoding.UTF8.GetBytes($"CAMCTRL|{cmd}|{lcdName}");
+                MyAPIGateway.Multiplayer.SendMessageToServer(CTRL_MESSAGE_ID, data);
+            };
+            action.Writer = (block, sb) => sb.Append(label);
+            MyAPIGateway.TerminalControls.AddAction<IMyButtonPanel>(action);
         }
 
         /// <summary>

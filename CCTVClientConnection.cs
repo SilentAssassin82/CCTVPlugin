@@ -87,6 +87,7 @@ namespace CCTVPlugin
 		public int Port => _config.TcpPort;
 		public ulong SteamId => _config.SpectatorSteamId;
 		public int CameraCount => _cameras.Count;
+		public string LiveFeedLcdName => _config.LiveFeedLcdName;
 
 		// 🔍 DIAGNOSTIC: Expose queue state
 		public int QueuedFrames
@@ -1346,6 +1347,61 @@ namespace CCTVPlugin
 					: $"[{Name}] 💤 No players within {radius:F0}m of any '{lcdPrefix}*' LCD - pausing LCD stream");
 				_wasPlayerNearby = _anyPlayerNearby;
 			}
+		}
+
+		/// <summary>
+		/// Manually advance to the next camera. Resets the cycle timer so the new camera
+		/// displays for a full interval before auto-cycling resumes.
+		/// </summary>
+		public void ManualNextCamera()
+		{
+			if (_cameras.Count == 0) return;
+			_currentCameraIndex = (_currentCameraIndex + 1) % _cameras.Count;
+			ExecuteManualSwitch();
+		}
+
+		/// <summary>
+		/// Manually go back to the previous camera.
+		/// </summary>
+		public void ManualPreviousCamera()
+		{
+			if (_cameras.Count == 0) return;
+			_currentCameraIndex = (_currentCameraIndex - 1 + _cameras.Count) % _cameras.Count;
+			ExecuteManualSwitch();
+		}
+
+		/// <summary>
+		/// Reset the auto-cycle timer without switching camera.
+		/// Useful after a manual switch to restart the countdown cleanly.
+		/// </summary>
+		public void ResetAutoCycle()
+		{
+			_cameraCycleTicks = 0;
+			_preTeleportSent = false;
+			_nextCameraIndexForPreTP = -1;
+			Log.Info($"[{Name}] 🔄 Auto-cycle timer reset");
+		}
+
+		/// <summary>
+		/// Common logic for manual camera switches — sends commands, teleports,
+		/// and resets the cycle timer so the chosen camera gets a full display window.
+		/// </summary>
+		private void ExecuteManualSwitch()
+		{
+			var cam = _cameras[_currentCameraIndex];
+			_currentCameraEntityId = cam.EntityId;
+			_cameraCycleTicks = 0;
+			_preTeleportSent = false;
+			_nextCameraIndexForPreTP = -1;
+
+			Send($"CAMERA {_currentCameraIndex + 1}");
+			Send("SPECTATOR");
+			TeleportToCamera(cam);
+
+			_lastCameraSwitchTime = DateTime.UtcNow;
+			_awaitingFirstFrameAfterSwitch = true;
+
+			Log.Info($"[{Name}] 🎮 Manual → camera {_currentCameraIndex + 1}/{_cameras.Count}: {cam.DisplayName}");
 		}
 
 		public void Dispose()

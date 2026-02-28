@@ -58,6 +58,11 @@ namespace CCTVPlugin
         private int _cameraCycleTicks = 0;
         private int _currentCameraIndex = 0;
 
+        // In-game button control (MESSAGE_ID 12347: client → server)
+        private const ushort CTRL_MESSAGE_ID = 12347;
+        private bool _ctrlHandlerRegistered = false;
+        private readonly ConcurrentQueue<Action> _pendingCameraActions = new ConcurrentQueue<Action>();
+
         private readonly List<CameraInfo> _indexedCameras = new List<CameraInfo>();
         private readonly Dictionary<long, CameraInfo> _cameraByEntity = new Dictionary<long, CameraInfo>();
 
@@ -250,6 +255,18 @@ namespace CCTVPlugin
             // Handle multi-client mode
             if (_useMultiClientMode)
             {
+                // Register camera control message handler on first tick (MyAPIGateway ready by now)
+                if (!_ctrlHandlerRegistered)
+                {
+                    MyAPIGateway.Multiplayer.RegisterMessageHandler(CTRL_MESSAGE_ID, OnCameraControlMessage);
+                    _ctrlHandlerRegistered = true;
+                    Log.Info($"✅ Camera control message handler registered (ID: {CTRL_MESSAGE_ID})");
+                }
+
+                // Drain actions queued by the message handler (game-thread safe)
+                while (_pendingCameraActions.TryDequeue(out var act))
+                    act();
+
                 // Update each client connection (process queued frames)
                 foreach (var connection in _clientConnections)
                 {
@@ -327,6 +344,48 @@ namespace CCTVPlugin
                     _cameraCycleTicks = 0;
                     CycleToNextCamera();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Routes CAMCTRL messages from in-game button panels to the correct CCTVClientConnection.
+        /// Format: "CAMCTRL|NEXT|Test01", "CAMCTRL|PREV|Test01", "CAMCTRL|RESET|Test01"
+        /// Called on network thread — queues work for the game thread.
+        /// </summary>
+        private void OnCameraControlMessage(byte[] data)
+        {
+            try
+            {
+                string msg = Encoding.UTF8.GetString(data);
+                string[] parts = msg.Split('|');
+                if (parts.Length < 3 || parts[0] != "CAMCTRL") return;
+
+                string action = parts[1];
+                string lcdName = parts[2];
+
+                var connection = _clientConnections.FirstOrDefault(c =>
+                    string.Equals(c.LiveFeedLcdName, lcdName, StringComparison.OrdinalIgnoreCase));
+
+                if (connection == null)
+                {
+                    Log.Warn($"CAMCTRL: no connection found for LiveFeedLcdName='{lcdName}'");
+                    return;
+                }
+
+                _pendingCameraActions.Enqueue(() =>
+                {
+                    switch (action)
+                    {
+                        case "NEXT":  connection.ManualNextCamera();    break;
+                        case "PREV":  connection.ManualPreviousCamera(); break;
+                        case "RESET": connection.ResetAutoCycle();       break;
+                        default: Log.Warn($"CAMCTRL: unknown action '{action}'"); break;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error in OnCameraControlMessage");
             }
         }
 
@@ -2347,6 +2406,13 @@ namespace CCTVPlugin
         public void Dispose()
         {
             Log.Info("CCTVPlugin: Disposing");
+
+            if (_ctrlHandlerRegistered)
+            {
+                try { MyAPIGateway.Multiplayer.UnregisterMessageHandler(CTRL_MESSAGE_ID, OnCameraControlMessage); }
+                catch { }
+                _ctrlHandlerRegistered = false;
+            }
 
             CleanupClient();
             CleanupModClient();
