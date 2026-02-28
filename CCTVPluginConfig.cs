@@ -345,9 +345,13 @@ namespace CCTVPlugin
         {
             if (_useMultiClientMode && _fakeClientInstances != null && _fakeClientInstances.Count > 0)
             {
+                Log.Info($"GetClientInstances: multi-client mode, {_fakeClientInstances.Count} instance(s):");
+                foreach (var inst in _fakeClientInstances)
+                    Log.Info($"  - [{inst.Name}] Port={inst.TcpPort} SteamId={inst.SpectatorSteamId} Suffix='{inst.CameraSuffix}' Enabled={inst.Enabled}");
                 return _fakeClientInstances;
             }
 
+            Log.Warn($"GetClientInstances: falling back to legacy single-client mode (MultiClientMode={_useMultiClientMode}, InstanceCount={_fakeClientInstances?.Count ?? -1})");
             // Legacy mode: Create single instance from old settings
             return new List<CCTVClientInstanceConfig>
             {

@@ -108,18 +108,22 @@ To run multiple fake clients simultaneously (one per faction, area, etc.) set `U
 <UseMultiClientMode>true</UseMultiClientMode>
 <ClientInstances>
   <Instance>
-    <Name>Alpha</Name>
+    <Name>Client1</Name>
     <TcpPort>12345</TcpPort>
-    <CameraPrefix>LCD_TVCamera_A</CameraPrefix>
+    <CameraPrefix>LCD_TVCamera</CameraPrefix>
+    <CameraSuffix>Test01</CameraSuffix>
     <LcdPrefix>LCD_TV</LcdPrefix>
+    <LiveFeedLcdName>Test01</LiveFeedLcdName>
     <SpectatorSteamId>111111111111111</SpectatorSteamId>
     <Enabled>true</Enabled>
   </Instance>
   <Instance>
-    <Name>Bravo</Name>
+    <Name>Client2</Name>
     <TcpPort>12346</TcpPort>
-    <CameraPrefix>LCD_TVCamera_B</CameraPrefix>
+    <CameraPrefix>LCD_TVCamera</CameraPrefix>
+    <CameraSuffix>Test02</CameraSuffix>
     <LcdPrefix>LCD_TV</LcdPrefix>
+    <LiveFeedLcdName>Test02</LiveFeedLcdName>
     <SpectatorSteamId>222222222222222</SpectatorSteamId>
     <Enabled>true</Enabled>
   </Instance>
