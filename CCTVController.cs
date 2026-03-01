@@ -60,6 +60,7 @@ namespace CCTVPlugin
 
         // In-game button control (MESSAGE_ID 12347: client → server)
         private const ushort CTRL_MESSAGE_ID = 12347;
+        private const long   CTRL_MOD_CHANNEL = 123461234L; // server-side mod → plugin (same process)
         private bool _ctrlHandlerRegistered = false;
         private readonly ConcurrentQueue<Action> _pendingCameraActions = new ConcurrentQueue<Action>();
 
@@ -258,9 +259,12 @@ namespace CCTVPlugin
                 // Register camera control message handler on first tick (MyAPIGateway ready by now)
                 if (!_ctrlHandlerRegistered)
                 {
+                    // Server-side (dedicated): button actions fire server-side and use SendModMessage
+                    MyAPIGateway.Utilities.RegisterMessageHandler(CTRL_MOD_CHANNEL, OnCameraControlModMessage);
+                    // Client-side (listen server / single-player): button actions send over network
                     MyAPIGateway.Multiplayer.RegisterMessageHandler(CTRL_MESSAGE_ID, OnCameraControlMessage);
                     _ctrlHandlerRegistered = true;
-                    Log.Info($"✅ Camera control message handler registered (ID: {CTRL_MESSAGE_ID})");
+                    Log.Info($"✅ Camera control message handler registered (ID: {CTRL_MESSAGE_ID}, ModChannel: {CTRL_MOD_CHANNEL})");
                 }
 
                 // Drain actions queued by the message handler (game-thread safe)
@@ -352,11 +356,26 @@ namespace CCTVPlugin
         /// Format: "CAMCTRL|NEXT|Test01", "CAMCTRL|PREV|Test01", "CAMCTRL|RESET|Test01"
         /// Called on network thread — queues work for the game thread.
         /// </summary>
-        private void OnCameraControlMessage(byte[] data)
+        private void OnCameraControlModMessage(object data)
         {
             try
             {
-                string msg = Encoding.UTF8.GetString(data);
+                string msg = data as string;
+                if (msg != null) ProcessCameraControl(msg);
+            }
+            catch (Exception ex) { Log.Error(ex, "Error in OnCameraControlModMessage"); }
+        }
+
+        private void OnCameraControlMessage(byte[] data)
+        {
+            try { ProcessCameraControl(Encoding.UTF8.GetString(data)); }
+            catch (Exception ex) { Log.Error(ex, "Error in OnCameraControlMessage"); }
+        }
+
+        private void ProcessCameraControl(string msg)
+        {
+            try
+            {
                 Log.Info($"🎮 CAMCTRL received: '{msg}' (connections: {_clientConnections.Count})");
 
                 string[] parts = msg.Split('|');
@@ -394,10 +413,7 @@ namespace CCTVPlugin
                     }
                 });
             }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Error in OnCameraControlMessage");
-            }
+            catch (Exception ex) { Log.Error(ex, "Error in ProcessCameraControl"); }
         }
 
         private void Initialize()
@@ -2420,8 +2436,8 @@ namespace CCTVPlugin
 
             if (_ctrlHandlerRegistered)
             {
-                try { MyAPIGateway.Multiplayer.UnregisterMessageHandler(CTRL_MESSAGE_ID, OnCameraControlMessage); }
-                catch { }
+                try { MyAPIGateway.Utilities.UnregisterMessageHandler(CTRL_MOD_CHANNEL, OnCameraControlModMessage); } catch { }
+                try { MyAPIGateway.Multiplayer.UnregisterMessageHandler(CTRL_MESSAGE_ID, OnCameraControlMessage); } catch { }
                 _ctrlHandlerRegistered = false;
             }
 

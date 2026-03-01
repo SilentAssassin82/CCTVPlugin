@@ -18,6 +18,7 @@ namespace CCTVMod
     {
         private const ushort MESSAGE_ID = 12346; // server → client: GOTO / spectator control
         private const ushort CTRL_MESSAGE_ID = 12347; // client → server: button control
+        private const long   CTRL_MOD_CHANNEL = 123461234L; // server-side mod → Torch plugin (same process)
         
         private readonly Dictionary<string, Vector3D> _cameraPositions = new Dictionary<string, Vector3D>();
         private readonly Queue<Action> _gameThreadActions = new Queue<Action>();
@@ -71,15 +72,23 @@ namespace CCTVMod
             action.ValidForGroups = false;
             action.Action = (block) =>
             {
-                if (MyAPIGateway.Session.IsServer && MyAPIGateway.Utilities.IsDedicated)
-                    return;
-
                 string lcdName = (block.CustomData ?? "").Trim();
                 if (string.IsNullOrEmpty(lcdName))
                     return;
 
-                byte[] data = Encoding.UTF8.GetBytes($"CAMCTRL|{cmd}|{lcdName}");
-                MyAPIGateway.Multiplayer.SendMessageToServer(CTRL_MESSAGE_ID, data);
+                string message = $"CAMCTRL|{cmd}|{lcdName}";
+
+                if (MyAPIGateway.Session.IsServer)
+                {
+                    // Dedicated server: action fires server-side — use mod messaging (same-process)
+                    MyAPIGateway.Utilities.SendModMessage(CTRL_MOD_CHANNEL, message);
+                }
+                else
+                {
+                    // Client (listen server / single-player): send over network
+                    byte[] data = Encoding.UTF8.GetBytes(message);
+                    MyAPIGateway.Multiplayer.SendMessageToServer(CTRL_MESSAGE_ID, data);
+                }
             };
             action.Writer = (block, sb) => sb.Append(label);
             MyAPIGateway.TerminalControls.AddAction<IMyButtonPanel>(action);
