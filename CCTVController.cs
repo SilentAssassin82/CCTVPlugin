@@ -357,11 +357,21 @@ namespace CCTVPlugin
             try
             {
                 string msg = Encoding.UTF8.GetString(data);
+                Log.Info($"🎮 CAMCTRL received: '{msg}' (connections: {_clientConnections.Count})");
+
                 string[] parts = msg.Split('|');
-                if (parts.Length < 3 || parts[0] != "CAMCTRL") return;
+                if (parts.Length < 3 || parts[0] != "CAMCTRL")
+                {
+                    Log.Warn($"CAMCTRL: malformed message '{msg}'");
+                    return;
+                }
 
                 string action = parts[1];
                 string lcdName = parts[2];
+
+                Log.Info($"🎮 CAMCTRL routing: action='{action}' lcdName='{lcdName}'");
+                foreach (var c in _clientConnections)
+                    Log.Info($"  connection '{c.Name}' LiveFeedLcdName='{c.LiveFeedLcdName}'");
 
                 var connection = _clientConnections.FirstOrDefault(c =>
                     string.Equals(c.LiveFeedLcdName, lcdName, StringComparison.OrdinalIgnoreCase));
@@ -372,6 +382,7 @@ namespace CCTVPlugin
                     return;
                 }
 
+                Log.Info($"🎮 CAMCTRL queuing '{action}' on [{connection.Name}]");
                 _pendingCameraActions.Enqueue(() =>
                 {
                     switch (action)
