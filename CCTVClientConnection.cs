@@ -42,6 +42,10 @@ namespace CCTVPlugin
 		private int _currentCameraIndex = 0;
 		private long _currentCameraEntityId = 0;
 
+		// Tracks the camera list last sent to CCTVCapture so we only push an
+		// update when the list actually changes, not on every periodic rescan.
+		private string _lastSentCameraListSignature = null;
+
 		// Auto-cycling state
 		private int _cameraCycleTicks = 0;
 		private readonly int _cameraCycleIntervalTicks; // Configured baseline (ticks)
@@ -212,13 +216,40 @@ namespace CCTVPlugin
 			}
 
 			// Debug: Log config settings
-			Log.Debug($"[{Name}] Config: CameraPrefix='{_config.CameraPrefix}', FactionTag='{_config.FactionTag ?? "None"}'");
+				Log.Debug($"[{Name}] Config: CameraPrefix='{_config.CameraPrefix}', FactionTag='{_config.FactionTag ?? "None"}'");
 
-			// ⚡ If a client is connected, automatically send the updated camera list
+				// Re-pin _currentCameraIndex to the same physical camera after list rebuild.
+				// Without this, adding or removing a camera mid-game shifts the interleaved
+				// sort order and _currentCameraIndex points to the wrong camera on the next cycle.
+				if (_currentCameraEntityId != 0)
+				{
+					int newIndex = _cameras.FindIndex(c => c.EntityId == _currentCameraEntityId);
+					if (newIndex >= 0)
+					{
+						_currentCameraIndex = newIndex;
+						Log.Debug($"[{Name}] Re-pinned camera index to {_currentCameraIndex} after rescan (EntityId: {_currentCameraEntityId})");
+					}
+					else
+					{
+						// Current camera is no longer in this connection's list — reset so cycling restarts cleanly
+						Log.Info($"[{Name}] Current camera (EntityId: {_currentCameraEntityId}) no longer in list after rescan, resetting index");
+						_currentCameraIndex = 0;
+						_currentCameraEntityId = 0;
+					}
+				}
+
+				// ⚡ If a client is connected, send the camera list only when it changed.
+				// Sending on every rescan floods CCTVCapture with CAMERAS/CAMERA lines
+				// even when nothing is different, creating log noise and wasted bandwidth.
 			if (IsConnected)
 			{
-				Log.Info($"[{Name}] 📤 Sending camera list to connected client ({_cameras.Count} cameras)");
-				SendCameraListToClient();
+				string newSig = BuildCameraListSignature();
+				if (newSig != _lastSentCameraListSignature)
+				{
+					Log.Info($"[{Name}] 📤 Camera list changed — sending to client ({_cameras.Count} cameras)");
+					SendCameraListToClient();
+					_lastSentCameraListSignature = newSig;
+				}
 
 				// If we have cameras and aren't on one yet, auto-switch to first camera
 				if (_cameras.Count > 0 && _currentCameraEntityId == 0)
@@ -231,6 +262,13 @@ namespace CCTVPlugin
 					TeleportToCamera(_cameras[0]);
 				}
 			}
+		}
+
+		/// Returns a string that uniquely represents the current camera list.
+		/// Changes when cameras are added, removed, or reordered.
+		private string BuildCameraListSignature()
+		{
+			return string.Join(",", _cameras.Select(c => c.EntityId.ToString()));
 		}
 
 		/// <summary>
@@ -353,6 +391,7 @@ namespace CCTVPlugin
 						{
 							Log.Info($"[{Name}] 📤 Sending camera list immediately ({_cameras.Count} cameras)");
 							SendCameraListToClient();
+							_lastSentCameraListSignature = BuildCameraListSignature();
 
 							// Auto-switch to first camera
 							_currentCameraIndex = 0;
@@ -434,6 +473,7 @@ namespace CCTVPlugin
 				_client?.Close();
 				_client = null;
 				_stream = null;
+				_lastSentCameraListSignature = null; // force full list re-send on next connection
 			}
 		}
 
@@ -1067,29 +1107,26 @@ namespace CCTVPlugin
 			IMyTextPanel foundLcd = null;
 			int totalLcds = 0;
 
-			MyAPIGateway.Entities.GetEntities(null, entity =>
+			// Use MyEntities (Torch internal) rather than MyAPIGateway.Entities so that
+			// non-static (dynamic) grids — e.g. vehicles — are included in the scan.
+			// MyAPIGateway.Entities can miss dynamic grids in the Torch plugin context.
+			foreach (var grid in MyEntities.GetEntities().OfType<MyCubeGrid>())
 			{
-				var grid = entity as MyCubeGrid;
-				if (grid != null)
+				if (grid == null) continue;
+				foreach (var block in grid.GetFatBlocks())
 				{
-					foreach (var block in grid.GetFatBlocks())
+					var lcd = block as IMyTextPanel;
+					if (lcd == null) continue;
+					totalLcds++;
+					if (lcd.CustomName == name)
 					{
-						var lcd = block as IMyTextPanel;
-						if (lcd != null)
-						{
-							totalLcds++;
-
-							if (lcd.CustomName == name)
-							{
-								foundLcd = lcd;
-								Log.Debug($"[{Name}] ✅ FOUND LCD: '{name}' (Grid: {grid.DisplayName})");
-								return false; // Stop searching
-							}
-						}
+						foundLcd = lcd;
+						Log.Debug($"[{Name}] ✅ FOUND LCD: '{name}' (Grid: {grid.DisplayName}, Static: {grid.IsStatic})");
+						break;
 					}
 				}
-				return false;
-			});
+				if (foundLcd != null) break;
+			}
 
 			if (foundLcd != null)
 				_lcdCache[name] = foundLcd;
@@ -1098,27 +1135,21 @@ namespace CCTVPlugin
 			{
 				Log.Warn($"[{Name}] ❌ LCD NOT FOUND: '{name}' (scanned {totalLcds} total LCDs)");
 
-				// Debug: List all available LCDs with similar names (only on first failure per session)
+				// Debug: List all available LCDs with a matching prefix to help diagnose naming issues
 				if (totalLcds > 0)
 				{
 					Log.Debug($"[{Name}] 🔍 Listing LCDs with prefix '{_config.LcdPrefix}':");
 					int count = 0;
-					MyAPIGateway.Entities.GetEntities(null, entity =>
+					foreach (var grid in MyEntities.GetEntities().OfType<MyCubeGrid>())
 					{
-						var grid = entity as MyCubeGrid;
-						if (grid != null)
+						if (grid == null) continue;
+						foreach (var block in grid.GetFatBlocks())
 						{
-							foreach (var block in grid.GetFatBlocks())
-							{
-								var lcd = block as IMyTextPanel;
-								if (lcd != null && (lcd.CustomName.Contains(_config.LcdPrefix) || lcd.CustomName.Contains("SLAVE")))
-								{
-									Log.Debug($"[{Name}]    #{++count}: '{lcd.CustomName}' (Grid: {grid.DisplayName})");
-								}
-							}
+							var lcd = block as IMyTextPanel;
+							if (lcd != null && (lcd.CustomName.Contains(_config.LcdPrefix) || lcd.CustomName.Contains("SLAVE")))
+								Log.Debug($"[{Name}]    #{++count}: '{lcd.CustomName}' (Grid: {grid.DisplayName}, Static: {grid.IsStatic})");
 						}
-						return false;
-					});
+					}
 				}
 			}
 
@@ -1133,13 +1164,25 @@ namespace CCTVPlugin
 			if (lcd == null)
 				return;
 
+			// Auto HUD mode: if the LCD is on a non-static (moving) grid, force a fully
+			// transparent background so the feed overlays the pilot's view instead of
+			// blocking it. Explicit LcdBackgroundAlpha config only applies to static grids.
+			bool isOnDynamicGrid = false;
+			try { isOnDynamicGrid = (lcd.CubeGrid as MyCubeGrid)?.IsStatic == false; }
+			catch { }
+
+			int effectiveAlpha = isOnDynamicGrid ? 0 : Math.Max(0, Math.Min(255, _config.LcdBackgroundAlpha));
+
+			if (isOnDynamicGrid)
+				Log.Debug($"[{Name}] 🚗 HUD mode: LCD '{lcd.CustomName}' is on a dynamic grid — transparent background applied");
+
 			lcd.WriteText(content);
 			lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
 			lcd.Font = "Monospace";
 			lcd.FontSize = fontSize;
 			lcd.TextPadding = 0f;
 			lcd.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.LEFT;
-			lcd.BackgroundColor = new Color(0, 0, 0);
+			lcd.BackgroundColor = new Color(0, 0, 0, (byte)effectiveAlpha);
 
 			// SE color chars encode their own color — white font lets them render correctly.
 			// Grayscale uses the configured font tint instead.

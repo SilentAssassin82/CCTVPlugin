@@ -84,6 +84,20 @@ The mod registers three terminal actions that appear in every Button Panel's G-m
 
 ---
 
+## Vehicle HUD Mode
+
+When a feed LCD is placed on a **non-static (moving) grid** — such as a ship or rover — the plugin automatically sets its background alpha to `0` (fully transparent). The CCTV feed becomes a HUD overlay visible through the cockpit windshield without blocking the pilot's view.
+
+`LcdBackgroundAlpha` in the instance config controls the background opacity for **static-grid** LCDs only (0 = transparent, 255 = fully opaque black, default). Dynamic-grid LCDs always use `0` regardless of this setting.
+
+**Recommended vehicle HUD setup:**
+1. Place a **Transparent LCD** panel over the cockpit viewport
+2. Assign it as the `LiveFeedLcdName` for the instance
+3. Set `UseColorMode=false` and `LcdFontTint` to a green tint (e.g. `0,200,80`) for a night-vision overlay effect
+4. The background turns transparent automatically — no extra config required
+
+---
+
 ## How It Works
 
 1. The Torch plugin scans for camera blocks whose names start with the configured `CameraPrefix` (default `LCD_TVCamera`)
@@ -137,6 +151,7 @@ To run multiple fake clients simultaneously (one per faction, area, etc.) set `U
     <CameraSuffix>Test01</CameraSuffix>
     <LcdPrefix>LCD_TV</LcdPrefix>
     <LiveFeedLcdName>Test01</LiveFeedLcdName>
+    <LcdBackgroundAlpha>255</LcdBackgroundAlpha>
     <SpectatorSteamId>111111111111111</SpectatorSteamId>
     <Enabled>true</Enabled>
   </Instance>
@@ -147,6 +162,7 @@ To run multiple fake clients simultaneously (one per faction, area, etc.) set `U
     <CameraSuffix>Test02</CameraSuffix>
     <LcdPrefix>LCD_TV</LcdPrefix>
     <LiveFeedLcdName>Test02</LiveFeedLcdName>
+    <LcdBackgroundAlpha>255</LcdBackgroundAlpha>
     <SpectatorSteamId>222222222222222</SpectatorSteamId>
     <Enabled>true</Enabled>
   </Instance>
@@ -165,6 +181,7 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - Slave LCD support — any number of copies per quadrant panel; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
 - **Button panel control** — Next / Prev / Reset actions assignable to any in-game button panel via G-menu
+- **Auto HUD mode** — LCDs on moving (non-static) grids automatically receive a fully transparent background, turning the feed into a cockpit HUD overlay
 - Pre-emptive teleport — GOTO sent ahead of the display switch to hide latency
 - Adaptive cycle timing — EWMA of settle times, floored at the configured interval
 - Proximity gate — LCD writes pause automatically when no players are nearby

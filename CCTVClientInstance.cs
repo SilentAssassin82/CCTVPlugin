@@ -54,6 +54,18 @@ namespace CCTVPlugin
         [XmlElement("LiveFeedLcdName")]
         public string LiveFeedLcdName { get; set; } = "";
 
+        /// <summary>
+        /// Alpha channel (0–255) for the LCD background colour.
+        /// 255 = fully opaque black background (default, normal wall-mounted screen).
+        ///   0 = fully transparent background — only the rendered character pixels are
+        ///       visible, letting the occupant see through to the world behind the panel.
+        ///       Use this for a vehicle HUD: place a Transparent LCD in front of the
+        ///       cockpit, set LcdFontTint to a green tint (e.g. "0,200,80") and
+        ///       UseColorMode=false for a night-vision overlay effect.
+        /// </summary>
+        [XmlElement("LcdBackgroundAlpha")]
+        public int LcdBackgroundAlpha { get; set; } = 255;
+
         [XmlElement("Enabled")]
         public bool Enabled { get; set; } = true;
 

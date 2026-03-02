@@ -1,4 +1,5 @@
 ﻿using Sandbox.ModAPI;
+using Sandbox.ModAPI.Interfaces.Terminal;
 using VRage.Game;
 using VRage.Game.Components;
 using VRageMath;
@@ -27,6 +28,14 @@ namespace CCTVMod
         // Static flag: terminal actions must only be registered once per game session.
         // Using static prevents double-registration if the session component is reloaded.
         private static bool _actionsRegistered = false;
+
+        // Action instances held statically so they outlive any single world load.
+        // Injected via CustomActionGetter (not AddAction) to avoid corrupting the
+        // IMyButtonPanel terminal control list, which would remove the Settings panel
+        // and CustomData field from every button panel's terminal UI.
+        private static IMyTerminalAction _nextAction;
+        private static IMyTerminalAction _prevAction;
+        private static IMyTerminalAction _resetAction;
 
         private bool _isInitialized = false;
         private bool _pendingActionRegistration = false;
@@ -71,14 +80,22 @@ namespace CCTVMod
 
             try
             {
-                BuildCamCtrlAction("CCTV_Next",  "CCTV: Next Camera",  "NEXT");
-                BuildCamCtrlAction("CCTV_Prev",  "CCTV: Prev Camera",  "PREV");
-                BuildCamCtrlAction("CCTV_Reset", "CCTV: Reset Cycle",  "RESET");
+                _nextAction  = BuildCamCtrlAction("CCTV_Next",  "CCTV: Next Camera",  "NEXT");
+                _prevAction  = BuildCamCtrlAction("CCTV_Prev",  "CCTV: Prev Camera",  "PREV");
+                _resetAction = BuildCamCtrlAction("CCTV_Reset", "CCTV: Reset Cycle",  "RESET");
+
+                // Subscribe via CustomActionGetter instead of calling AddAction.
+                // AddAction permanently modifies SE's terminal registry and triggers a
+                // control-list rebuild that drops the vanilla Settings panel and
+                // CustomData field from every IMyButtonPanel in the world.
+                // CustomActionGetter injects actions dynamically at picker-open time
+                // and never touches the registry, so vanilla controls stay intact.
+                MyAPIGateway.TerminalControls.CustomActionGetter += OnCustomActionGetter;
             }
             catch (Exception) { }
         }
 
-        private void BuildCamCtrlAction(string id, string label, string cmd)
+        private static IMyTerminalAction BuildCamCtrlAction(string id, string label, string cmd)
         {
             var action = MyAPIGateway.TerminalControls.CreateAction<IMyButtonPanel>(id);
             action.Name = new StringBuilder(label);
@@ -105,10 +122,17 @@ namespace CCTVMod
                 }
             };
             action.Writer = (block, sb) => sb.Append(label);
-            // AddAction puts the action into SE's terminal registry on all sides:
-            // - server registry → button execution works when a player presses the panel
-            // - client registry → action appears in the G-menu action picker
-            MyAPIGateway.TerminalControls.AddAction<IMyButtonPanel>(action);
+            return action; // Caller registers via CustomActionGetter, not AddAction
+        }
+
+        private static void OnCustomActionGetter(IMyTerminalBlock block, List<IMyTerminalAction> actions)
+        {
+            if (!(block is IMyButtonPanel))
+                return;
+
+            if (_nextAction  != null) actions.Add(_nextAction);
+            if (_prevAction  != null) actions.Add(_prevAction);
+            if (_resetAction != null) actions.Add(_resetAction);
         }
 
         /// <summary>
@@ -266,7 +290,11 @@ namespace CCTVMod
                 catch { }
             }
 
-            _actionsRegistered = false;
+            // Do NOT reset _actionsRegistered here. SE's terminal action registry is a
+            // global static that persists for the entire server process lifetime — it is
+            // NOT cleared on world unload. Resetting the flag causes AddAction to be called
+            // again on the next world load, appending duplicate action IDs to the same
+            // list, which corrupts the button panel config UI.
         }
     }
 }
