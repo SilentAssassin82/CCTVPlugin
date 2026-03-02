@@ -61,6 +61,29 @@ The plugin will detect cameras, send GOTO messages and begin cycling. LCDs updat
 
 ---
 
+## Button Panel Control
+
+The mod registers three terminal actions that appear in every Button Panel's G-menu action picker:
+
+| Action | Effect |
+|--------|--------|
+| `CCTV: Next Camera` | Advance to the next camera in the cycle |
+| `CCTV: Prev Camera` | Go back to the previous camera |
+| `CCTV: Reset Cycle` | Restart the auto-cycle timer without switching camera |
+
+### Setup
+
+1. Place a **Button Panel** block in-game
+2. Open its terminal and set **Custom Data** to the `LiveFeedLcdName` of the feed you want to control — e.g. `Test01`
+3. Open the G-menu (**G** key), select the button panel, click a button slot → **Pick Action** → choose one of the three `CCTV:` actions
+4. Press the button in-game — the plugin receives the command and switches the camera immediately
+
+> **One button panel can control one feed.** The `CustomData` value is sent with every button press to identify which `CCTVCapture` instance to target. To control multiple feeds, use separate button panels each with a different `CustomData` value matching the corresponding `LiveFeedLcdName`.
+
+> **The mod must be enabled in world settings** for the actions to appear in the G-menu picker. The client-side mod handles G-menu display; the server-side mod handles button execution — both sides register automatically.
+
+---
+
 ## How It Works
 
 1. The Torch plugin scans for camera blocks whose names start with the configured `CameraPrefix` (default `LCD_TVCamera`)
@@ -141,6 +164,7 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - 181×181 single LCD and 362×362 2×2 grid modes
 - Slave LCD support — any number of copies per quadrant panel; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
+- **Button panel control** — Next / Prev / Reset actions assignable to any in-game button panel via G-menu
 - Pre-emptive teleport — GOTO sent ahead of the display switch to hide latency
 - Adaptive cycle timing — EWMA of settle times, floored at the configured interval
 - Proximity gate — LCD writes pause automatically when no players are nearby
@@ -158,6 +182,12 @@ The slave LCD's grid must have a powered, broadcasting radio antenna. Without on
 
 **LCDs not updating**
 Verify the LCD custom name matches the pattern exactly: `{LcdPrefix} {camera base name}`. Names are case-insensitive.
+
+**Button panel actions not appearing in G-menu**
+Ensure the client-side mod (`CCTVMod`) is enabled in world settings. Actions register on the first game tick after session load — if you open the G-menu immediately on join, wait a moment and reopen it.
+
+**Button panel press does nothing**
+Check the button panel's **Custom Data** contains exactly the `LiveFeedLcdName` value from the plugin config (e.g. `Test01`). No spaces, no quotes. Also confirm the Torch log shows `🎮 CAMCTRL received:` when the button is pressed — if that line is absent the message never reached the plugin.
 
 **Teleportation not working**
 Set `SpectatorSteamId` to the Steam ID of the fake client account. Ensure the client-side mod is enabled and the fake client is in spectator mode (F8) before connecting.

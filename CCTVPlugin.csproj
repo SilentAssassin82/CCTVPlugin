@@ -14,6 +14,11 @@
     <Compile Remove="CCTVMod\**" />
     <EmbeddedResource Remove="CCTVMod\**" />
     <None Remove="CCTVMod\**" />
+    <!-- Exclude generated obj files from sub-projects to avoid duplicate attribute errors -->
+    <Compile Remove="CCTVCapture\obj\**" />
+    <Compile Remove="CCTVTester\obj\**" />
+    <!-- Exclude AppData mod folders — mod scripts are compiled by SE, not this project -->
+    <Compile Remove="$(APPDATA)\SpaceEngineers\Mods\**" />
     <None Remove="UI\CCTVPluginControl.xaml" />
   </ItemGroup>
   <ItemGroup>
@@ -98,20 +103,33 @@
       <Generator>MSBuild:Compile</Generator>
     </None>
   </ItemGroup>
+  <ItemGroup>
+    <Folder Include="%25AppData%25\SpaceEngineers\Mods\FakeClientMod\Data\Scripts\" />
+  </ItemGroup>
+
+  <!-- Post-build: Deploy mod script to all targets that need it -->
+  <Target Name="CopyModScript" AfterTargets="Build">
+    <!-- 1. Local SE mods folder — staging area for Workshop publish -->
+    <Message Text="Deploying CCTVCameraController.cs..." Importance="high" />
+    <MakeDir Directories="$(APPDATA)\SpaceEngineers\Mods\CCTVMod\Data\Scripts\" />
+    <Copy SourceFiles="CCTVMod\Data\Scripts\CCTVCameraController.cs" DestinationFolder="$(APPDATA)\SpaceEngineers\Mods\CCTVMod\Data\Scripts\" SkipUnchangedFiles="true" />
+    <Message Text="  ✅ Local SE mods folder updated" Importance="high" />
+
+    <!-- 2. Server Torch content cache — bypasses Workshop, takes effect on next Torch restart -->
+    <MakeDir Directories="\\DESKTOP-CPJTJG1\Torch\Instance\content\244850\3670758606\Data\Scripts\" />
+    <Copy SourceFiles="CCTVMod\Data\Scripts\CCTVCameraController.cs" DestinationFolder="\\DESKTOP-CPJTJG1\Torch\Instance\content\244850\3670758606\Data\Scripts\" SkipUnchangedFiles="true" />
+    <Message Text="  ✅ Server Torch cache updated — restart Torch to load new mod" Importance="high" />
+  </Target>
 
   <!-- Post-build: Copy CCTVCommon.dll to CCTVCapture output folders -->
   <Target Name="CopyCCTVCommonToClient" AfterTargets="Build">
     <Message Text="Copying CCTVCommon.dll to CCTVCapture output directories..." Importance="high" />
 
     <!-- Copy to Debug folder -->
-    <Copy SourceFiles="$(OutputPath)CCTVCommon.dll" 
-          DestinationFolder="CCTVCapture\bin\x64\Debug\" 
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OutputPath)CCTVCommon.dll" DestinationFolder="CCTVCapture\bin\x64\Debug\" SkipUnchangedFiles="true" />
 
     <!-- Copy to Release folder -->
-    <Copy SourceFiles="$(OutputPath)CCTVCommon.dll" 
-          DestinationFolder="CCTVCapture\bin\Release\net48\" 
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OutputPath)CCTVCommon.dll" DestinationFolder="CCTVCapture\bin\Release\net48\" SkipUnchangedFiles="true" />
 
     <Message Text="✅ CCTVCommon.dll copied successfully!" Importance="high" />
   </Target>

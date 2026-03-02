@@ -2,6 +2,9 @@
 bin/
 obj/
 
+# Accidental %AppData% literal folder (created when env var not expanded in a command)
+%AppData%/
+
 # Proprietary SE/Torch reference DLLs (not redistributable - obtain from your local SE/Torch install)
 net48/
 

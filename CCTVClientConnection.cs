@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -801,10 +802,11 @@ namespace CCTVPlugin
 
 					// Send multiplayer message to client-side mod to move spectator camera
 					// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
+					var ic = CultureInfo.InvariantCulture;
 					string gotoMessage = $"GOTO|{SteamId}|{camera.DisplayName}|{camera.EntityId}|" +
-										$"{position.X}|{position.Y}|{position.Z}|" +
-										$"{forward.X}|{forward.Y}|{forward.Z}|" +
-										$"{up.X}|{up.Y}|{up.Z}";
+									$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
+									$"{forward.X.ToString(ic)}|{forward.Y.ToString(ic)}|{forward.Z.ToString(ic)}|" +
+									$"{up.X.ToString(ic)}|{up.Y.ToString(ic)}|{up.Z.ToString(ic)}";
 
 					byte[] data = System.Text.Encoding.UTF8.GetBytes(gotoMessage);
 					const ushort MESSAGE_ID = 12346;

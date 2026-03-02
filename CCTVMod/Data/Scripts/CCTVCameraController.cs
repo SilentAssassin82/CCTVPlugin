@@ -4,6 +4,7 @@ using VRage.Game.Components;
 using VRageMath;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace CCTVMod
@@ -23,24 +24,32 @@ namespace CCTVMod
         private readonly Dictionary<string, Vector3D> _cameraPositions = new Dictionary<string, Vector3D>();
         private readonly Queue<Action> _gameThreadActions = new Queue<Action>();
         
+        // Static flag: terminal actions must only be registered once per game session.
+        // Using static prevents double-registration if the session component is reloaded.
+        private static bool _actionsRegistered = false;
+
         private bool _isInitialized = false;
+        private bool _pendingActionRegistration = false;
         private int _tickCounter = 0;
 
         public override void LoadData()
         {
-            // Only run on clients (not dedicated servers)
-            if (MyAPIGateway.Session.IsServer && MyAPIGateway.Utilities.IsDedicated)
-            {
-                return;
-            }
-
             try
             {
-                // Register multiplayer message handler (ALLOWED by sandbox!)
-                MyAPIGateway.Multiplayer.RegisterMessageHandler(MESSAGE_ID, OnMessageReceived);
+                bool isDedicatedServer = MyAPIGateway.Session.IsServer && MyAPIGateway.Utilities.IsDedicated;
 
-                // Register in-game button actions on button panels
-                RegisterCameraControlActions();
+                if (!isDedicatedServer)
+                {
+                    // GOTO messages move the spectator camera — only meaningful on clients.
+                    MyAPIGateway.Multiplayer.RegisterMessageHandler(MESSAGE_ID, OnMessageReceived);
+                }
+
+                // Defer action registration to first UpdateAfterSimulation tick.
+                // LoadData() fires before SE's terminal system is ready — registering here
+                // corrupts the IMyButtonPanel terminal UI for ALL button panels.
+                // Must run on BOTH client and dedicated server: button presses execute
+                // server-side, so the server must have the actions in its registry.
+                _pendingActionRegistration = true;
 
                 _isInitialized = true;
             }
@@ -50,26 +59,31 @@ namespace CCTVMod
         }
 
         /// <summary>
-        /// Adds three terminal actions to all Button Panel blocks so players can assign
-        /// them to buttons in the button panel toolbar.
-        /// The button panel's CustomData must be set to the LiveFeedLcdName (e.g. "Test01").
+        /// Builds three terminal actions and injects them via CustomActionGetter so they
+        /// appear in the button panel action picker without touching the panel's terminal controls.
+        /// Called on the first UpdateAfterSimulation tick so the terminal system is ready.
         /// </summary>
         private void RegisterCameraControlActions()
         {
+            if (_actionsRegistered)
+                return;
+            _actionsRegistered = true;
+
             try
             {
-                CreateCamCtrlAction("CCTV_Next",  "CCTV: Next Camera",  "NEXT");
-                CreateCamCtrlAction("CCTV_Prev",  "CCTV: Prev Camera",  "PREV");
-                CreateCamCtrlAction("CCTV_Reset", "CCTV: Reset Cycle",  "RESET");
+                BuildCamCtrlAction("CCTV_Next",  "CCTV: Next Camera",  "NEXT");
+                BuildCamCtrlAction("CCTV_Prev",  "CCTV: Prev Camera",  "PREV");
+                BuildCamCtrlAction("CCTV_Reset", "CCTV: Reset Cycle",  "RESET");
             }
             catch (Exception) { }
         }
 
-        private void CreateCamCtrlAction(string id, string label, string cmd)
+        private void BuildCamCtrlAction(string id, string label, string cmd)
         {
             var action = MyAPIGateway.TerminalControls.CreateAction<IMyButtonPanel>(id);
             action.Name = new StringBuilder(label);
             action.ValidForGroups = false;
+            action.Enabled = (block) => true;
             action.Action = (block) =>
             {
                 string lcdName = (block.CustomData ?? "").Trim();
@@ -91,6 +105,9 @@ namespace CCTVMod
                 }
             };
             action.Writer = (block, sb) => sb.Append(label);
+            // AddAction puts the action into SE's terminal registry on all sides:
+            // - server registry → button execution works when a player presses the panel
+            // - client registry → action appears in the G-menu action picker
             MyAPIGateway.TerminalControls.AddAction<IMyButtonPanel>(action);
         }
 
@@ -127,9 +144,9 @@ namespace CCTVMod
                         if (parts.Length >= 6)
                         {
                             string cameraName = parts[2];
-                            double x = double.Parse(parts[3]);
-                            double y = double.Parse(parts[4]);
-                            double z = double.Parse(parts[5]);
+                            double x = double.Parse(parts[3], CultureInfo.InvariantCulture);
+                            double y = double.Parse(parts[4], CultureInfo.InvariantCulture);
+                            double z = double.Parse(parts[5], CultureInfo.InvariantCulture);
 
                             _cameraPositions[cameraName] = new Vector3D(x, y, z);
                         }
@@ -145,9 +162,9 @@ namespace CCTVMod
                             string cameraName = parts[2];
                             long entityId = long.Parse(parts[3]);
                             Vector3D position = new Vector3D(
-                                double.Parse(parts[4]),
-                                double.Parse(parts[5]),
-                                double.Parse(parts[6])
+                                double.Parse(parts[4], CultureInfo.InvariantCulture),
+                                double.Parse(parts[5], CultureInfo.InvariantCulture),
+                                double.Parse(parts[6], CultureInfo.InvariantCulture)
                             );
 
                             lock (_gameThreadActions)
@@ -203,6 +220,14 @@ namespace CCTVMod
             if (!_isInitialized)
                 return;
 
+            // Register terminal actions on the first tick after LoadData.
+            // The terminal system is guaranteed to be ready by this point.
+            if (_pendingActionRegistration)
+            {
+                _pendingActionRegistration = false;
+                RegisterCameraControlActions();
+            }
+
             // Execute queued actions on game thread
             lock (_gameThreadActions)
             {
@@ -230,7 +255,9 @@ namespace CCTVMod
 
         protected override void UnloadData()
         {
-            if (_isInitialized)
+            bool isDedicatedServer = MyAPIGateway.Session.IsServer && MyAPIGateway.Utilities.IsDedicated;
+
+            if (_isInitialized && !isDedicatedServer)
             {
                 try
                 {
@@ -238,6 +265,8 @@ namespace CCTVMod
                 }
                 catch { }
             }
+
+            _actionsRegistered = false;
         }
     }
 }

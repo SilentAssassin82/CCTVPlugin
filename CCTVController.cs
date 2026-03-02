@@ -63,6 +63,8 @@ namespace CCTVPlugin
         private const long   CTRL_MOD_CHANNEL = 123461234L; // server-side mod → plugin (same process)
         private bool _ctrlHandlerRegistered = false;
         private readonly ConcurrentQueue<Action> _pendingCameraActions = new ConcurrentQueue<Action>();
+        private int _pbScanTicks = 0;
+        private const int PB_SCAN_INTERVAL = 60; // scan every ~1 second
 
         private readonly List<CameraInfo> _indexedCameras = new List<CameraInfo>();
         private readonly Dictionary<long, CameraInfo> _cameraByEntity = new Dictionary<long, CameraInfo>();
@@ -271,6 +273,13 @@ namespace CCTVPlugin
                 while (_pendingCameraActions.TryDequeue(out var act))
                     act();
 
+                // Poll Programmable Blocks for CCTV commands (mod-free button control)
+                if (++_pbScanTicks >= PB_SCAN_INTERVAL)
+                {
+                    _pbScanTicks = 0;
+                    ScanProgrammableBlocksForCommands();
+                }
+
                 // Update each client connection (process queued frames)
                 foreach (var connection in _clientConnections)
                 {
@@ -356,6 +365,50 @@ namespace CCTVPlugin
         /// Format: "CAMCTRL|NEXT|Test01", "CAMCTRL|PREV|Test01", "CAMCTRL|RESET|Test01"
         /// Called on network thread — queues work for the game thread.
         /// </summary>
+        /// <summary>
+        /// Scans all Programmable Blocks for CustomData commands written by a simple PB script.
+        /// Format: "NEXT|Test01", "PREV|Test01", or "RESET|Test01"
+        /// Clears the CustomData after reading so each press fires exactly once.
+        /// No mod required — button panel triggers the PB, PB writes CustomData, plugin reads it.
+        /// </summary>
+        private void ScanProgrammableBlocksForCommands()
+        {
+            try
+            {
+                var grids = MyEntities.GetEntities().OfType<MyCubeGrid>();
+                foreach (var grid in grids)
+                {
+                    foreach (var block in grid.GetFatBlocks())
+                    {
+                        var pb = block as IMyProgrammableBlock;
+                        if (pb == null) continue;
+
+                        string data = (pb.CustomData ?? "").Trim();
+                        if (string.IsNullOrEmpty(data)) continue;
+
+                        string[] parts = data.Split('|');
+                        if (parts.Length < 2) continue;
+
+                        string action  = parts[0].Trim().ToUpperInvariant();
+                        string lcdName = parts[1].Trim();
+
+                        if (action != "NEXT" && action != "PREV" && action != "RESET") continue;
+                        if (!_clientConnections.Any(c => string.Equals(c.LiveFeedLcdName, lcdName, StringComparison.OrdinalIgnoreCase))) continue;
+
+                        // Clear immediately so the same command doesn't fire twice
+                        pb.CustomData = "";
+
+                        Log.Info($"🎮 PB command: {action}|{lcdName} (from '{pb.CustomName}')");
+                        ProcessCameraControl($"CAMCTRL|{action}|{lcdName}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error scanning PBs for CCTV commands");
+            }
+        }
+
         private void OnCameraControlModMessage(object data)
         {
             try
