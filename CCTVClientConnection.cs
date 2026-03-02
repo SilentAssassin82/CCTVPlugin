@@ -64,6 +64,10 @@ namespace CCTVPlugin
 		private bool _preTeleportSent = false;
 		private int _nextCameraIndexForPreTP = -1;
 
+		// Manual mode: set by Next/Prev buttons to pause auto-cycling.
+		// Cleared by ResetAutoCycle() so the player can re-enable normal cycling.
+		private bool _isManualMode = false;
+
 		// Frame queue - decoded frames ready to write to LCDs (on game thread)
 		private readonly Queue<(int width, int height, string decodedContent, bool isColor)> _frameQueue = new Queue<(int, int, string, bool)>();
 		private readonly object _frameQueueLock = new object();
@@ -665,8 +669,8 @@ namespace CCTVPlugin
 			if (!IsConnected)
 				return;
 
-			// Auto-cycle cameras if enabled
-			if (_sharedConfig.EnableAutoCameraCycling && _cameras.Count > 0)
+			// Auto-cycle cameras if enabled and not overridden by a manual button press
+			if (_sharedConfig.EnableAutoCameraCycling && _cameras.Count > 0 && !_isManualMode)
 			{
 				_cameraCycleTicks++;
 
@@ -1381,7 +1385,8 @@ namespace CCTVPlugin
 			_cameraCycleTicks = 0;
 			_preTeleportSent = false;
 			_nextCameraIndexForPreTP = -1;
-			Log.Info($"[{Name}] 🔄 Auto-cycle timer reset");
+			_isManualMode = false;
+			Log.Info($"[{Name}] 🔄 Auto-cycle resumed");
 		}
 
 		/// <summary>
@@ -1395,6 +1400,7 @@ namespace CCTVPlugin
 			_cameraCycleTicks = 0;
 			_preTeleportSent = false;
 			_nextCameraIndexForPreTP = -1;
+			_isManualMode = true;
 
 			Send($"CAMERA {_currentCameraIndex + 1}");
 			Send("SPECTATOR");
