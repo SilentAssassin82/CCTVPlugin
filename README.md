@@ -28,7 +28,8 @@ CCTVCapture.exe --port 12346 --host 192.168.1.100
 
 ### 3. CCTV Spectator Controller — Client-Side Mod
 Receives multiplayer GOTO messages from the plugin and moves the spectator camera directly using the local SE API. No character required — the fake client runs in pure spectator mode.
-Install to: `%AppData%\SpaceEngineers\Mods\`
+Steam Workshop: **[CCTV Spectator Controller](https://steamcommunity.com/sharedfiles/filedetails/?id=3670758606)**
+Manual install: `%AppData%\SpaceEngineers\Mods\`
 
 ---
 
@@ -38,7 +39,12 @@ Install to: `%AppData%\SpaceEngineers\Mods\`
 Copy `CCTVPlugin.dll` to `Torch/Plugins/` and restart Torch.
 
 ### 2. Install the client-side mod
-Copy the `CCTVMod` folder to `%AppData%\SpaceEngineers\Mods\` and enable it in world settings. The mod must be active on the fake client's SE instance.
+**Option A — Steam Workshop (recommended):**
+Subscribe to the mod on the Steam Workshop: **[CCTV Spectator Controller](https://steamcommunity.com/sharedfiles/filedetails/?id=3670758606)**
+Then enable it in world settings. The mod must be active on the fake client's SE instance.
+
+**Option B — Manual install:**
+Copy the `CCTVMod` folder to `%AppData%\SpaceEngineers\Mods\` and enable it in world settings.
 
 ### 3. Name your cameras and LCDs
 Camera and LCD names follow a prefix + base-name pattern:
