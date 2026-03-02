@@ -1,10 +1,10 @@
 ﻿<?xml version="1.0"?>
 <PluginManifest>
   <Name>CCTVPlugin</Name>
-  <Guid>12345678-1234-1234-1234-123456789ABC</Guid>
+  <Guid>e6912793-919f-486a-8ffd-b37ce045113b</Guid>
   <Version>1.0.0</Version>
-  <Description>Fake Client Controller - Remote camera control via TCP</Description>
+  <Description>Real-time ASCII CCTV system — streams true-color video from a second SE client to in-game LCD panels</Description>
   <Author>Chris</Author>
-  <Repository>https://github.com/yourusername/CCTVPlugin</Repository>
+  <Repository>https://github.com/SilentAssassin82/CCTVPlugin</Repository>
   <Dependencies />
 </PluginManifest>
