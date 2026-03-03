@@ -38,9 +38,23 @@ namespace CCTVPlugin
 		private volatile bool _isRunning;
 
 		// Per-client camera state
-		private readonly List<CameraInfo> _cameras = new List<CameraInfo>();
+		// _allCameras: every camera assigned to this connection (all loops).
+		// _cameras:    only the cameras in the currently active loop — used by all cycling code.
+		private readonly List<CameraInfo> _allCameras = new List<CameraInfo>();
+		private readonly List<CameraInfo> _cameras    = new List<CameraInfo>();
 		private int _currentCameraIndex = 0;
 		private long _currentCameraEntityId = 0;
+
+		// Camera loop support — cameras suffixed _L1, _L2 etc. form separate loops.
+		// _availableLoops: sorted list of loop numbers found at last rescan (0 = no suffix, 1 = _L1 ...).
+		// _currentLoopIndex: which loop number is currently active.
+		private static readonly System.Text.RegularExpressions.Regex LoopSuffixRegex =
+			new System.Text.RegularExpressions.Regex(
+				@"_L(\d+)$",
+				System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+				System.Text.RegularExpressions.RegexOptions.Compiled);
+		private readonly List<int> _availableLoops = new List<int>();
+		private int _currentLoopIndex = 0;
 
 		// Tracks the camera list last sent to CCTVCapture so we only push an
 		// update when the list actually changes, not on every periodic rescan.
@@ -204,23 +218,21 @@ namespace CCTVPlugin
 		public void UpdateCameras(List<CameraInfo> allCameras)
 		{
 			InvalidateLcdCache();
-			_cameras.Clear();
-			_cameras.AddRange(allCameras.Where(ShouldHandleCamera));
+			_allCameras.Clear();
+			_allCameras.AddRange(allCameras.Where(ShouldHandleCamera));
 
-			Log.Info($"[{Name}] Updated camera list: {_cameras.Count} cameras assigned (out of {allCameras.Count} total)");
+			Log.Info($"[{Name}] Updated camera list: {_allCameras.Count} cameras assigned (out of {allCameras.Count} total)");
 
-			// Log which cameras this connection is handling
-			foreach (var cam in _cameras)
-			{
+			foreach (var cam in _allCameras)
 				Log.Debug($"[{Name}] - Camera: {cam.DisplayName} (Faction: {cam.FactionTag ?? "None"})");
-			}
 
-			// Debug: Log config settings
-				Log.Debug($"[{Name}] Config: CameraPrefix='{_config.CameraPrefix}', FactionTag='{_config.FactionTag ?? "None"}'");
+			Log.Debug($"[{Name}] Config: CameraPrefix='{_config.CameraPrefix}', FactionTag='{_config.FactionTag ?? "None"}'");
+
+			// Discover available loops and rebuild _cameras for the current loop.
+			DiscoverLoops();
+			RebuildActiveCameras();
 
 				// Re-pin _currentCameraIndex to the same physical camera after list rebuild.
-				// Without this, adding or removing a camera mid-game shifts the interleaved
-				// sort order and _currentCameraIndex points to the wrong camera on the next cycle.
 				if (_currentCameraEntityId != 0)
 				{
 					int newIndex = _cameras.FindIndex(c => c.EntityId == _currentCameraEntityId);
@@ -231,37 +243,154 @@ namespace CCTVPlugin
 					}
 					else
 					{
-						// Current camera is no longer in this connection's list — reset so cycling restarts cleanly
 						Log.Info($"[{Name}] Current camera (EntityId: {_currentCameraEntityId}) no longer in list after rescan, resetting index");
 						_currentCameraIndex = 0;
 						_currentCameraEntityId = 0;
 					}
 				}
 
-				// ⚡ If a client is connected, send the camera list only when it changed.
-				// Sending on every rescan floods CCTVCapture with CAMERAS/CAMERA lines
-				// even when nothing is different, creating log noise and wasted bandwidth.
-			if (IsConnected)
-			{
-				string newSig = BuildCameraListSignature();
-				if (newSig != _lastSentCameraListSignature)
+				if (IsConnected)
 				{
-					Log.Info($"[{Name}] 📤 Camera list changed — sending to client ({_cameras.Count} cameras)");
-					SendCameraListToClient();
-					_lastSentCameraListSignature = newSig;
-				}
+					string newSig = BuildCameraListSignature();
+					if (newSig != _lastSentCameraListSignature)
+					{
+						Log.Info($"[{Name}] 📤 Camera list changed — sending to client ({_cameras.Count} cameras)");
+						SendCameraListToClient();
+						_lastSentCameraListSignature = newSig;
+					}
 
-				// If we have cameras and aren't on one yet, auto-switch to first camera
-				if (_cameras.Count > 0 && _currentCameraEntityId == 0)
-				{
-					Log.Info($"[{Name}] 🎬 Auto-switching to first camera: {_cameras[0].DisplayName}");
-					_currentCameraIndex = 0;
-					_currentCameraEntityId = _cameras[0].EntityId;
-					Send($"CAMERA 1");
-					Send("SPECTATOR");
-					TeleportToCamera(_cameras[0]);
+					if (_cameras.Count > 0 && _currentCameraEntityId == 0)
+					{
+						Log.Info($"[{Name}] 🎬 Auto-switching to first camera: {_cameras[0].DisplayName}");
+						_currentCameraIndex = 0;
+						_currentCameraEntityId = _cameras[0].EntityId;
+						Send($"CAMERA 1");
+						Send("SPECTATOR");
+						TeleportToCamera(_cameras[0]);
+					}
 				}
+		}
+
+		/// <summary>
+		/// Extracts the loop number from a camera display name.
+		/// "Test01_L1" → 1, "Test01_L2" → 2, "Test01" → 0 (no suffix = loop 0).
+		/// </summary>
+		private int ExtractLoopNumber(string displayName)
+		{
+			var m = LoopSuffixRegex.Match(displayName);
+			return (m.Success && int.TryParse(m.Groups[1].Value, out int n)) ? n : 0;
+		}
+
+		/// <summary>
+		/// Scans _allCameras to build the sorted list of available loop numbers.
+		/// If only loop 0 is found (no _L suffixes), there is just one loop and
+		/// NextLoop/PrevLoop will be no-ops.
+		/// </summary>
+		private void DiscoverLoops()
+		{
+			_availableLoops.Clear();
+			foreach (var cam in _allCameras)
+			{
+				int n = ExtractLoopNumber(cam.DisplayName);
+				if (!_availableLoops.Contains(n))
+					_availableLoops.Add(n);
 			}
+			_availableLoops.Sort();
+
+			// Clamp current loop index to an available loop (handles cameras being renamed/removed)
+			if (_availableLoops.Count > 0 && !_availableLoops.Contains(_currentLoopIndex))
+			{
+				_currentLoopIndex = _availableLoops[0];
+				Log.Info($"[{Name}] Current loop no longer exists after rescan — reset to loop {_currentLoopIndex}");
+			}
+
+			if (_availableLoops.Count > 1)
+				Log.Info($"[{Name}] 🔁 Camera loops discovered: {string.Join(", ", _availableLoops.Select(l => l == 0 ? "(none)" : $"_L{l}"))} — active: {(_currentLoopIndex == 0 ? "(none)" : $"_L{_currentLoopIndex}")}");
+		}
+
+		/// <summary>
+		/// Rebuilds _cameras to contain only cameras belonging to _currentLoopIndex.
+		/// When only one loop exists (no _L suffixes), _cameras == _allCameras.
+		/// </summary>
+		private void RebuildActiveCameras()
+		{
+			_cameras.Clear();
+			if (_availableLoops.Count <= 1)
+			{
+				_cameras.AddRange(_allCameras);
+			}
+			else
+			{
+				_cameras.AddRange(_allCameras.Where(c => ExtractLoopNumber(c.DisplayName) == _currentLoopIndex));
+			}
+			Log.Info($"[{Name}] Active loop {(_currentLoopIndex == 0 ? "(none)" : $"_L{_currentLoopIndex}")}: {_cameras.Count}/{_allCameras.Count} cameras");
+		}
+
+		/// <summary>
+		/// Advance to the next camera loop (_L1 → _L2 → ... → _L1).
+		/// No-op when only one loop exists.
+		/// </summary>
+		public void NextLoop()
+		{
+			if (_availableLoops.Count <= 1)
+			{
+				Log.Info($"[{Name}] NextLoop: only one loop available, nothing to switch");
+				return;
+			}
+			int idx = _availableLoops.IndexOf(_currentLoopIndex);
+			_currentLoopIndex = _availableLoops[(idx + 1) % _availableLoops.Count];
+			SwitchToLoop();
+		}
+
+		/// <summary>
+		/// Go back to the previous camera loop.
+		/// No-op when only one loop exists.
+		/// </summary>
+		public void PrevLoop()
+		{
+			if (_availableLoops.Count <= 1)
+			{
+				Log.Info($"[{Name}] PrevLoop: only one loop available, nothing to switch");
+				return;
+			}
+			int idx = _availableLoops.IndexOf(_currentLoopIndex);
+			_currentLoopIndex = _availableLoops[(idx - 1 + _availableLoops.Count) % _availableLoops.Count];
+			SwitchToLoop();
+		}
+
+		/// <summary>
+		/// Common logic after NextLoop/PrevLoop: rebuild camera list, push updated list to
+		/// CCTVCapture, and jump to the first camera in the new loop immediately.
+		/// </summary>
+		private void SwitchToLoop()
+		{
+			InvalidateLcdCache();
+			RebuildActiveCameras();
+
+			_currentCameraIndex = 0;
+			_currentCameraEntityId = 0;
+			_cameraCycleTicks = 0;
+			_preTeleportSent = false;
+			_nextCameraIndexForPreTP = -1;
+			_isManualMode = true; // pause auto-cycle; player presses Reset to re-enable
+
+			Log.Info($"[{Name}] 🔄 Switched to loop {(_currentLoopIndex == 0 ? "(none)" : $"_L{_currentLoopIndex}")} ({_cameras.Count} cameras)");
+
+			if (!IsConnected) return;
+
+			// Push the new camera list to CCTVCapture so its CAMERA index is correct
+			SendCameraListToClient();
+			_lastSentCameraListSignature = BuildCameraListSignature();
+
+			if (_cameras.Count == 0) return;
+
+			// Jump to first camera in the new loop
+			_currentCameraEntityId = _cameras[0].EntityId;
+			Send("CAMERA 1");
+			Send("SPECTATOR");
+			TeleportToCamera(_cameras[0]);
+			_lastCameraSwitchTime = DateTime.UtcNow;
+			_awaitingFirstFrameAfterSwitch = true;
 		}
 
 		/// Returns a string that uniquely represents the current camera list.

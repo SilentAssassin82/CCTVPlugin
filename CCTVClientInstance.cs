@@ -72,12 +72,33 @@ namespace CCTVPlugin
         [XmlElement("Description")]
         public string Description { get; set; } = "Public cameras";
 
+        // Matches the "_L{n}" loop suffix at the end of a camera display name.
+        // e.g. "Test01_L1" → group 1 = "1", "Test01" → no match.
+        private static readonly System.Text.RegularExpressions.Regex LoopSuffixRegex =
+            new System.Text.RegularExpressions.Regex(
+                @"_L(\d+)$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>
+        /// Strips a trailing "_L{n}" loop suffix from a camera display name.
+        /// "Test01_L1" → "Test01", "Test01" → "Test01" (unchanged).
+        /// </summary>
+        private static string StripLoopSuffix(string name)
+        {
+            var m = LoopSuffixRegex.Match(name);
+            return m.Success ? name.Substring(0, m.Index) : name;
+        }
+
         /// <summary>
         /// Determines if this instance should handle a camera based on faction or name.
         /// Priority: 1) Faction membership, 2) Camera suffix match, 3) All cameras if no filters
-        /// 
-        /// NOTE: In multi-client mode, cameraDisplayName is the SUFFIX (e.g., "Test01")
-        /// not the full name (e.g., "LCD_TVCamera Test01").
+        ///
+        /// Suffix matching strips any trailing "_L{n}" loop suffix before comparing, so
+        /// CameraSuffix="Test01" matches both "Test01" and "Test01_L1", "Test01_L2", etc.
+        ///
+        /// NOTE: In multi-client mode, cameraDisplayName is the SUFFIX (e.g., "Test01_L1")
+        /// not the full name (e.g., "LCD_TVCamera Test01_L1").
         /// </summary>
         public bool ShouldHandleCamera(string cameraDisplayName, string cameraFactionTag = null)
         {
@@ -92,10 +113,11 @@ namespace CCTVPlugin
                 {
                     bool factionMatch = FactionTag.Equals(cameraFactionTag, StringComparison.OrdinalIgnoreCase);
 
-                    // If faction matches, still check suffix if specified
+                    // If faction matches, still check suffix if specified (strip loop suffix first)
                     if (factionMatch && !string.IsNullOrEmpty(CameraSuffix))
                     {
-                        return cameraDisplayName.Equals(CameraSuffix, StringComparison.OrdinalIgnoreCase);
+                        return StripLoopSuffix(cameraDisplayName)
+                            .Equals(CameraSuffix, StringComparison.OrdinalIgnoreCase);
                     }
 
                     return factionMatch;
@@ -106,10 +128,12 @@ namespace CCTVPlugin
                 }
             }
 
-            // Priority 2: Check camera suffix match (if specified)
+            // Priority 2: Check camera suffix match (if specified).
+            // Strip trailing _L{n} so "Test01_L1" matches CameraSuffix="Test01".
             if (!string.IsNullOrEmpty(CameraSuffix))
             {
-                return cameraDisplayName.Equals(CameraSuffix, StringComparison.OrdinalIgnoreCase);
+                return StripLoopSuffix(cameraDisplayName)
+                    .Equals(CameraSuffix, StringComparison.OrdinalIgnoreCase);
             }
 
             // Priority 3: No filters - accept ALL cameras with the prefix

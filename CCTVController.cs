@@ -459,9 +459,11 @@ namespace CCTVPlugin
                 {
                     switch (action)
                     {
-                        case "NEXT":  connection.ManualNextCamera();    break;
-                        case "PREV":  connection.ManualPreviousCamera(); break;
-                        case "RESET": connection.ResetAutoCycle();       break;
+                        case "NEXT":     connection.ManualNextCamera();    break;
+                        case "PREV":     connection.ManualPreviousCamera(); break;
+                        case "RESET":    connection.ResetAutoCycle();       break;
+                        case "NEXTLOOP": connection.NextLoop();             break;
+                        case "PREVLOOP": connection.PrevLoop();             break;
                         default: Log.Warn($"CAMCTRL: unknown action '{action}'"); break;
                     }
                 });

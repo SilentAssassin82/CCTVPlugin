@@ -76,6 +76,8 @@ The mod registers three terminal actions that appear in every Button Panel's G-m
 | `CCTV: Next Camera` | Advance to the next camera in the cycle |
 | `CCTV: Prev Camera` | Go back to the previous camera |
 | `CCTV: Reset Cycle` | Restart the auto-cycle timer without switching camera |
+| `CCTV: Next Loop` | Switch to the next camera loop (_L1 → _L2 → ...) |
+| `CCTV: Prev Loop` | Switch to the previous camera loop |
 
 ### Setup
 
@@ -87,6 +89,34 @@ The mod registers three terminal actions that appear in every Button Panel's G-m
 > **One button panel can control one feed.** The `CustomData` value is sent with every button press to identify which `CCTVCapture` instance to target. To control multiple feeds, use separate button panels each with a different `CustomData` value matching the corresponding `LiveFeedLcdName`.
 
 > **The mod must be enabled in world settings** for the actions to appear in the G-menu picker. The client-side mod handles G-menu display; the server-side mod handles button execution — both sides register automatically.
+
+---
+
+## Camera Loops
+
+Camera loops let you group cameras into named sets that share a single set of LCDs. Pressing **Next Loop** / **Prev Loop** switches which group is cycling — the same master LCD immediately starts showing the new loop's feed with no stale image.
+
+### Naming convention
+
+Append `_L1`, `_L2`, etc. to both the camera name **and** nothing else — the LCD name stays unchanged:
+
+| Camera block name | Loop |
+|---|---|
+| `LCD_TVCamera Test01_L1` | Loop 1 |
+| `LCD_TVCamera Test01_L2` | Loop 2 |
+| `LCD_TV Test01` | **Master LCD (shared by all loops)** |
+
+Slave LCDs follow the same rule as always — they are slaves of the master LCD, not of any specific loop.
+
+### Setup
+
+1. Name your cameras with `_L1` / `_L2` suffixes as above
+2. Keep `CameraSuffix=Test01` in the instance config — the plugin automatically matches all loop variants
+3. Keep `LiveFeedLcdName=Test01` unchanged — all loops write to the same LCD
+4. Assign **CCTV: Next Loop** and/or **CCTV: Prev Loop** to button panel slots (same `CustomData` as the camera buttons)
+5. Press the button — the LCD switches to the new loop's cameras on the very next frame
+
+> **Backwards compatible:** instances with no `_L{n}` suffixes on any camera have a single loop — Next/Prev Loop are silent no-ops.
 
 ---
 
@@ -187,6 +217,7 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - Slave LCD support — any number of copies per quadrant panel; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
 - **Button panel control** — Next / Prev / Reset actions assignable to any in-game button panel via G-menu
+- **Camera loops** — group cameras into `_L1`/`_L2` sets; Next Loop / Prev Loop switches the active group on the same LCD with no stale frame
 - **Auto HUD mode** — LCDs on moving (non-static) grids automatically receive a fully transparent background, turning the feed into a cockpit HUD overlay
 - Pre-emptive teleport — GOTO sent ahead of the display switch to hide latency
 - Adaptive cycle timing — EWMA of settle times, floored at the configured interval

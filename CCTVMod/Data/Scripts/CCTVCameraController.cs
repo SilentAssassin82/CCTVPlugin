@@ -36,6 +36,8 @@ namespace CCTVMod
         private static IMyTerminalAction _nextAction;
         private static IMyTerminalAction _prevAction;
         private static IMyTerminalAction _resetAction;
+        private static IMyTerminalAction _nextLoopAction;
+        private static IMyTerminalAction _prevLoopAction;
 
         private bool _isInitialized = false;
         private bool _pendingActionRegistration = false;
@@ -80,9 +82,11 @@ namespace CCTVMod
 
             try
             {
-                _nextAction  = BuildCamCtrlAction("CCTV_Next",  "CCTV: Next Camera",  "NEXT");
-                _prevAction  = BuildCamCtrlAction("CCTV_Prev",  "CCTV: Prev Camera",  "PREV");
-                _resetAction = BuildCamCtrlAction("CCTV_Reset", "CCTV: Reset Cycle",  "RESET");
+                _nextAction  = BuildCamCtrlAction("CCTV_Next",     "CCTV: Next Camera",  "NEXT");
+                _prevAction  = BuildCamCtrlAction("CCTV_Prev",     "CCTV: Prev Camera",  "PREV");
+                _resetAction = BuildCamCtrlAction("CCTV_Reset",    "CCTV: Reset Cycle",  "RESET");
+                _nextLoopAction = BuildCamCtrlAction("CCTV_NextLoop", "CCTV: Next Loop",  "NEXTLOOP");
+                _prevLoopAction = BuildCamCtrlAction("CCTV_PrevLoop", "CCTV: Prev Loop",  "PREVLOOP");
 
                 // Subscribe via CustomActionGetter instead of calling AddAction.
                 // AddAction permanently modifies SE's terminal registry and triggers a
@@ -133,6 +137,8 @@ namespace CCTVMod
             if (_nextAction  != null) actions.Add(_nextAction);
             if (_prevAction  != null) actions.Add(_prevAction);
             if (_resetAction != null) actions.Add(_resetAction);
+            if (_nextLoopAction != null) actions.Add(_nextLoopAction);
+            if (_prevLoopAction != null) actions.Add(_prevLoopAction);
         }
 
         /// <summary>
