@@ -1027,6 +1027,7 @@ namespace CCTVPlugin
 				{
 					string singleLcdName = $"{_config.LcdPrefix} {baseName}";
 					WriteSingleLCD(singleLcdName, content, isColor);
+					CopyToSlaveLCDs(_config.LcdPrefix, baseName);
 				}
 				else if (width == _sharedConfig.LcdGridResolution && height == _sharedConfig.LcdGridResolution)
 				{
@@ -1377,6 +1378,26 @@ namespace CCTVPlugin
 								break;
 							}
 						}
+
+						// Single LCD slave: starts with "{lcdPrefix} {baseName}" directly
+						// (no quadrant suffix) e.g. "LCD_TV Test01_Slave", "LCD_TV Test01_Slave2"
+						string singleMaster = $"{lcdPrefix} {baseName}";
+						if (lcdName.Length > singleMaster.Length &&
+							lcdName.StartsWith(singleMaster, StringComparison.OrdinalIgnoreCase))
+						{
+							string remainder = lcdName.Substring(singleMaster.Length);
+							bool isQuadrantSlave =
+								remainder.StartsWith("_TL", StringComparison.OrdinalIgnoreCase) ||
+								remainder.StartsWith("_TR", StringComparison.OrdinalIgnoreCase) ||
+								remainder.StartsWith("_BL", StringComparison.OrdinalIgnoreCase) ||
+								remainder.StartsWith("_BR", StringComparison.OrdinalIgnoreCase);
+							if (!isQuadrantSlave)
+							{
+								if (!slavesByQuad.ContainsKey("_SINGLE"))
+									slavesByQuad["_SINGLE"] = new List<IMyTextPanel>();
+								slavesByQuad["_SINGLE"].Add(lcd);
+							}
+						}
 					}
 					return false;
 				});
@@ -1387,11 +1408,11 @@ namespace CCTVPlugin
 
 			if (slavesByQuad.Count == 0)
 			{
-				Log.Debug($"[{Name}] 📋 No slave LCDs found for '{baseName}' - name them e.g. 'LCD_TV {baseName}_TL_Slave'");
+				Log.Debug($"[{Name}] 📋 No slave LCDs found for '{baseName}' - name them e.g. 'LCD_TV {baseName}_TL_Slave' or 'LCD_TV {baseName}_Slave'");
 				return;
 			}
 
-			// Copy master content to each slave group (master looked up silently — it was just written)
+			// Copy master content to each grid quadrant slave group
 			foreach (string quad in quadrants)
 			{
 				if (!slavesByQuad.TryGetValue(quad, out var slaves) || slaves.Count == 0)
@@ -1415,6 +1436,30 @@ namespace CCTVPlugin
 					slaveLcd.Alignment = masterLcd.Alignment;
 
 					Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
+				}
+			}
+
+			// Copy master single LCD content to single slaves (e.g. "LCD_TV Test01_Slave")
+			if (slavesByQuad.TryGetValue("_SINGLE", out var singleSlaves) && singleSlaves.Count > 0)
+			{
+				string masterLcdName = $"{lcdPrefix} {baseName}";
+				var masterLcd = FindLCDByName(masterLcdName, silent: true);
+				if (masterLcd != null)
+				{
+					string masterText = masterLcd.GetText();
+					foreach (var slaveLcd in singleSlaves)
+					{
+						slaveLcd.WriteText(masterText);
+						slaveLcd.ContentType = masterLcd.ContentType;
+						slaveLcd.Font = masterLcd.Font;
+						slaveLcd.FontSize = masterLcd.FontSize;
+						slaveLcd.FontColor = masterLcd.FontColor;
+						slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
+						slaveLcd.TextPadding = masterLcd.TextPadding;
+						slaveLcd.Alignment = masterLcd.Alignment;
+
+						Log.Debug($"[{Name}] ✅ Copied to single slave: '{slaveLcd.CustomName}'");
+					}
 				}
 			}
 		}
