@@ -232,6 +232,12 @@ namespace CCTVPlugin
 			DiscoverLoops();
 			RebuildActiveCameras();
 
+			// Invalidate any in-flight pre-TP state: after rebuilding the list the pre-TP
+			// index may refer to a different camera (e.g. round-robin reorder on rescan).
+			// Better to re-issue the teleport on the next cycle than to skip it silently.
+			_preTeleportSent = false;
+			_nextCameraIndexForPreTP = -1;
+
 				// Re-pin _currentCameraIndex to the same physical camera after list rebuild.
 				if (_currentCameraEntityId != 0)
 				{
@@ -373,6 +379,13 @@ namespace CCTVPlugin
 			_preTeleportSent = false;
 			_nextCameraIndexForPreTP = -1;
 			_isManualMode = false; // keep auto-cycle running in the new loop
+
+			// Reset settle-time EWMA so the previous loop's timings don't carry over.
+			// L2 cameras may be in completely different locations with different settle
+			// latencies; starting fresh avoids the cycle interval being wrongly
+			// extended (or shrunk) based on stale L1 observations.
+			_settleTimeEwmaMs = 3000f;
+			_settleTimeObservations = 0;
 
 			Log.Info($"[{Name}] 🔄 Switched to loop {(_currentLoopIndex == 0 ? "(none)" : $"_L{_currentLoopIndex}")} ({_cameras.Count} cameras)");
 
@@ -1134,18 +1147,40 @@ namespace CCTVPlugin
 			int quadW = width / 2;
 			int quadH = height / 2;
 
-			// Split full grid content into 4 quadrants
+			// Split full grid content into 4 quadrants.
+			// Grayscale source has height/2 rows (full image scaled to fit effectiveQuadH×2).
+			// Colour source has height rows (full image at 1:1).
 			string[] lines = content.Split('\n');
-			if (lines.Length < height)
+			int minLines = isColor ? height : height / 2;
+			if (lines.Length < minLines)
 			{
-				Log.Warn($"[{Name}] ⚠️ Grid content has {lines.Length} lines, expected {height}");
+				Log.Warn($"[{Name}] ⚠️ Grid content has {lines.Length} lines, expected {minLines}");
 				return;
 			}
 
-			string tlContent = ExtractQuadrant(lines, 0, 0, quadW, quadH);
-			string trContent = ExtractQuadrant(lines, quadW, 0, quadW, quadH);
-			string blContent = ExtractQuadrant(lines, 0, quadH, quadW, quadH);
-			string brContent = ExtractQuadrant(lines, quadW, quadH, quadW, quadH);
+			// SE Monospace grayscale chars have a ~2:1 height-to-width aspect ratio.
+			// At GridFontSize=0.1 (calibrated for colour), grayscale chars are half as wide,
+			// so 181 chars only fill the left ~50% of each panel — the right side appears blank.
+			// Fix: double the font size for grayscale so chars fill the full panel width, and
+			// halve the row count so the content doesn't overflow the panel vertically.
+			// The source is pre-scaled to height/2 rows so all rows map to the full image.
+			float gridFontSize;
+			int effectiveQuadH;
+			if (isColor)
+			{
+				gridFontSize    = _sharedConfig.GridFontSize;
+				effectiveQuadH  = quadH;           // 181 rows per quadrant
+			}
+			else
+			{
+				gridFontSize    = _sharedConfig.GridFontSize * 2f;
+				effectiveQuadH  = quadH / 2;       // 90 rows per quadrant (2× font, full coverage)
+			}
+
+			string tlContent = ExtractQuadrant(lines, 0,     0,              quadW, effectiveQuadH);
+			string trContent = ExtractQuadrant(lines, quadW, 0,              quadW, effectiveQuadH);
+			string blContent = ExtractQuadrant(lines, 0,     effectiveQuadH, quadW, effectiveQuadH);
+			string brContent = ExtractQuadrant(lines, quadW, effectiveQuadH, quadW, effectiveQuadH);
 
 			// Build full LCD names: "LCD_TV Test01_TL" format
 			// Pattern: <Prefix><space><BaseName><Quadrant>
@@ -1154,9 +1189,7 @@ namespace CCTVPlugin
 			string blLcdName = $"{lcdPrefix} {baseName}_BL";
 			string brLcdName = $"{lcdPrefix} {baseName}_BR";
 
-			// Write to each LCD quadrant using GridFontSize (default 0.1f)
-			float gridFontSize = _sharedConfig.GridFontSize;
-			Log.Debug($"[{Name}] Writing TL quadrant to '{tlLcdName}' ({tlContent.Length} chars)");
+			Log.Debug($"[{Name}] Writing TL quadrant to '{tlLcdName}' ({tlContent.Length} chars, font {gridFontSize:F3})");
 			WriteSingleLCD(tlLcdName, tlContent, isColor, gridFontSize);
 
 			Log.Debug($"[{Name}] Writing TR quadrant to '{trLcdName}' ({trContent.Length} chars)");

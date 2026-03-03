@@ -30,7 +30,7 @@ namespace CCTVPlugin
         private float _fontScale = 1.0f;
         private bool _autoAdjustFontSize = true;
         private string _postProcessMode = "None";
-        private string _gridPostProcessMode = "LightBlur";
+        private string _gridPostProcessMode = "None";
         private bool _enableVerboseFrameLogging = false;
         private float _gridFontSize = 0.1f;
         private float _proximityCheckRadius = 150f;

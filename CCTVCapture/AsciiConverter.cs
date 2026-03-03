@@ -48,10 +48,17 @@ namespace CCTVCapture
         [ThreadStatic]
         private static float[] _bChannelBuf;
 
-        // Contrast multiplier for color conversion (1.0 = no change, 1.3 = moderate boost)
-        // Kept at 1.0 to avoid amplifying in-game SSAO/ambient noise into visible quantization artifacts
-        private const float CONTRAST = 1.0f;
+        // Contrast boost applied to grayscale paths only (1.0 = no change, 1.3 = moderate boost).
+        // NOT used for colour paths — boosting contrast before 3-bit quantisation pushes more
+        // pixels to 0 or 7, producing blocky colour artifacts on SE LCDs.
+        private const float CONTRAST = 1.2f;
         private const float CONTRAST_MIDPOINT = 0.5f;
+
+        // Gamma applied to luminance BEFORE contrast in grayscale paths.
+        // Values < 1.0 lift shadows so dark SE scenes (space background, unlit terrain)
+        // produce faint texture characters instead of clipping to SPACE.
+        // 0.75 lowers the all-space clipping threshold from lum<0.083 down to lum<0.044.
+        private const float GRAYSCALE_GAMMA = 0.75f;
 
         /// <summary>
         /// Apply contrast adjustment to a 0-255 value
@@ -122,7 +129,7 @@ namespace CCTVCapture
                 for (int x = 0; x < width; x++)
                 {
                     int sumB = 0, sumG = 0, sumR = 0;
-                    int count = 0;
+                    int totalWeight = 0;
 
                     for (int ky = -radius; ky <= radius; ky++)
                     {
@@ -133,19 +140,23 @@ namespace CCTVCapture
 
                             if (px >= 0 && px < width && py >= 0 && py < height)
                             {
+                                // Gaussian-weighted for radius==1 (LightBlur): centre=4, cross=2, corners=1
+                                // Falls back to equal weighting (box blur) for radius > 1
+                                int dist = Math.Abs(kx) + Math.Abs(ky);
+                                int weight = (radius == 1) ? (dist == 0 ? 4 : dist == 1 ? 2 : 1) : 1;
                                 int idx = py * stride + px * 3;
-                                sumB += srcPixels[idx];
-                                sumG += srcPixels[idx + 1];
-                                sumR += srcPixels[idx + 2];
-                                count++;
+                                sumB += srcPixels[idx] * weight;
+                                sumG += srcPixels[idx + 1] * weight;
+                                sumR += srcPixels[idx + 2] * weight;
+                                totalWeight += weight;
                             }
                         }
                     }
 
                     int dstIdx = y * stride + x * 3;
-                    dstPixels[dstIdx] = (byte)(sumB / count);
-                    dstPixels[dstIdx + 1] = (byte)(sumG / count);
-                    dstPixels[dstIdx + 2] = (byte)(sumR / count);
+                    dstPixels[dstIdx] = (byte)(sumB / totalWeight);
+                    dstPixels[dstIdx + 1] = (byte)(sumG / totalWeight);
+                    dstPixels[dstIdx + 2] = (byte)(sumR / totalWeight);
                 }
             }
 
@@ -285,10 +296,10 @@ namespace CCTVCapture
                 for (int x = 0; x < targetWidth; x++)
                 {
                     int idx = rowOffset + x * 3;
-                    // Format24bppRgb is BGR order
-                    byte b = AdjustContrast(pixels[idx]);
-                    byte g2 = AdjustContrast(pixels[idx + 1]);
-                    byte r = AdjustContrast(pixels[idx + 2]);
+                    // Format24bppRgb is BGR order. No contrast adjustment — see CONTRAST comment.
+                    byte b = pixels[idx];
+                    byte g2 = pixels[idx + 1];
+                    byte r = pixels[idx + 2];
 
                     result.Append(ColorToChar(r, g2, b));
                 }
@@ -356,10 +367,10 @@ namespace CCTVCapture
                 for (int x = 0; x < targetWidth; x++)
                 {
                     int idx = rowOffset + x * 3;
-                    // Apply contrast and normalize to 0-1 range
-                    bChannel[rowBase + x] = AdjustContrast(pixels[idx]) / 255f;
-                    gChannel[rowBase + x] = AdjustContrast(pixels[idx + 1]) / 255f;
-                    rChannel[rowBase + x] = AdjustContrast(pixels[idx + 2]) / 255f;
+                    // Normalize to 0-1 range. No contrast adjustment — see CONTRAST comment.
+                    bChannel[rowBase + x] = pixels[idx] / 255f;
+                    gChannel[rowBase + x] = pixels[idx + 1] / 255f;
+                    rChannel[rowBase + x] = pixels[idx + 2] / 255f;
                 }
             }
 
@@ -390,32 +401,35 @@ namespace CCTVCapture
                     float errG = oldG - gChannel[i];
                     float errB = oldB - bChannel[i];
 
-                    // Distribute error to neighboring pixels (Floyd-Steinberg weights)
+                    // Distribute error to neighboring pixels (Floyd-Steinberg weights).
+                    // DITHER_STRENGTH < 1.0 reduces grain from SE's coarse 8-level palette
+                    // without disabling color smoothing entirely (0.75 = good balance).
+                    const float DITHER_STRENGTH = 1.0f;
                     if (x + 1 < targetWidth)
                     {
-                        rChannel[i + 1] += errR * 7f / 16f;
-                        gChannel[i + 1] += errG * 7f / 16f;
-                        bChannel[i + 1] += errB * 7f / 16f;
+                        rChannel[i + 1] += errR * (7f / 16f) * DITHER_STRENGTH;
+                        gChannel[i + 1] += errG * (7f / 16f) * DITHER_STRENGTH;
+                        bChannel[i + 1] += errB * (7f / 16f) * DITHER_STRENGTH;
                     }
 
                     if (y + 1 < targetHeight)
                     {
                         if (x > 0)
                         {
-                            rChannel[nextRowBase + x - 1] += errR * 3f / 16f;
-                            gChannel[nextRowBase + x - 1] += errG * 3f / 16f;
-                            bChannel[nextRowBase + x - 1] += errB * 3f / 16f;
+                            rChannel[nextRowBase + x - 1] += errR * (3f / 16f) * DITHER_STRENGTH;
+                            gChannel[nextRowBase + x - 1] += errG * (3f / 16f) * DITHER_STRENGTH;
+                            bChannel[nextRowBase + x - 1] += errB * (3f / 16f) * DITHER_STRENGTH;
                         }
 
-                        rChannel[nextRowBase + x] += errR * 5f / 16f;
-                        gChannel[nextRowBase + x] += errG * 5f / 16f;
-                        bChannel[nextRowBase + x] += errB * 5f / 16f;
+                        rChannel[nextRowBase + x] += errR * (5f / 16f) * DITHER_STRENGTH;
+                        gChannel[nextRowBase + x] += errG * (5f / 16f) * DITHER_STRENGTH;
+                        bChannel[nextRowBase + x] += errB * (5f / 16f) * DITHER_STRENGTH;
 
                         if (x + 1 < targetWidth)
                         {
-                            rChannel[nextRowBase + x + 1] += errR * 1f / 16f;
-                            gChannel[nextRowBase + x + 1] += errG * 1f / 16f;
-                            bChannel[nextRowBase + x + 1] += errB * 1f / 16f;
+                            rChannel[nextRowBase + x + 1] += errR * (1f / 16f) * DITHER_STRENGTH;
+                            gChannel[nextRowBase + x + 1] += errG * (1f / 16f) * DITHER_STRENGTH;
+                            bChannel[nextRowBase + x + 1] += errB * (1f / 16f) * DITHER_STRENGTH;
                         }
                     }
 
@@ -451,13 +465,19 @@ namespace CCTVCapture
 
         /// <summary>
         /// Converts a bitmap to grayscale ASCII using fast LockBits pixel access
-        /// with contrast enhancement
+        /// with contrast enhancement.
+        /// Pass forGrid=true when the output will be split into quadrants; this skips
+        /// the 2:1 aspect-ratio correction so the row count equals targetHeight.
         /// </summary>
-        public static string ConvertToAscii(Bitmap image, int targetWidth, int targetHeight, bool useBlockMode = true)
+        public static string ConvertToAscii(Bitmap image, int targetWidth, int targetHeight, bool useBlockMode = true, bool forGrid = false)
         {
             char[] charRamp = RICH_RAMP;
 
-            // SE LCD characters are roughly 1:2 (width:height)
+            // SE LCD characters are roughly 1:2 (width:height).
+            // For grid splits, WriteGridLCDs uses effectiveQuadH = height/4 (90 rows per
+            // quadrant at 2× font size). Generating targetHeight rows means only the top
+            // half of the source is ever displayed. Generating targetHeight/2 rows instead
+            // scales the full image into exactly 2×effectiveQuadH rows so every row is used.
             int adjustedHeight = targetHeight / 2;
 
             // Resize image to target dimensions
@@ -485,6 +505,17 @@ namespace CCTVCapture
 
             resized.UnlockBits(bmpData);
 
+            // Precompute gamma + contrast → char-index LUT for the 256 possible grayscale levels.
+            // Avoids calling Math.Pow inside the tight per-pixel loop (~130k iterations per frame).
+            int[] charLUT = new int[256];
+            for (int i = 0; i < 256; i++)
+            {
+                float lv = (float)Math.Pow(i / 255f, GRAYSCALE_GAMMA);
+                lv = (lv - CONTRAST_MIDPOINT) * CONTRAST + CONTRAST_MIDPOINT;
+                lv = lv < 0f ? 0f : (lv > 1f ? 1f : lv);
+                charLUT[i] = (int)(lv * (charRamp.Length - 1) + 0.5f);
+            }
+
             // Convert to ASCII with contrast boost
             StringBuilder result = new StringBuilder((targetWidth + 1) * adjustedHeight);
 
@@ -494,17 +525,11 @@ namespace CCTVCapture
                 for (int x = 0; x < targetWidth; x++)
                 {
                     int idx = rowOffset + x * 3;
-                    // Format24bppRgb is BGR order
-                    float luminance = (pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f) / 255f;
+                    // Format24bppRgb is BGR order — compute grayscale as int for LUT lookup
+                    int gray = (int)(pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f);
+                    if (gray < 0) gray = 0; else if (gray > 255) gray = 255;
 
-                    // Apply contrast
-                    luminance = (luminance - CONTRAST_MIDPOINT) * CONTRAST + CONTRAST_MIDPOINT;
-                    luminance = luminance < 0f ? 0f : (luminance > 1f ? 1f : luminance);
-
-                    int charIndex = (int)(luminance * (charRamp.Length - 1) + 0.5f);
-                    charIndex = Math.Max(0, Math.Min(charRamp.Length - 1, charIndex));
-
-                    result.Append(charRamp[charIndex]);
+                    result.Append(charRamp[charLUT[gray]]);
                 }
 
                 if (y < adjustedHeight - 1)
@@ -559,9 +584,10 @@ namespace CCTVCapture
                 for (int x = 0; x < targetWidth; x++)
                 {
                     int idx = rowOffset + x * 3;
-                    byte pb = AdjustContrast(pixels[idx]);
-                    byte pg = AdjustContrast(pixels[idx + 1]);
-                    byte pr = AdjustContrast(pixels[idx + 2]);
+                    // No contrast adjustment on colour values — see CONTRAST comment.
+                    byte pb = pixels[idx];
+                    byte pg = pixels[idx + 1];
+                    byte pr = pixels[idx + 2];
 
                     float luminance = (pr * 0.299f + pg * 0.587f + pb * 0.114f) / 255f;
                     int charIndex = (int)(luminance * (charRamp.Length - 1) + 0.5f);
@@ -596,11 +622,15 @@ namespace CCTVCapture
         }
 
         /// <summary>
-        /// Converts with Floyd-Steinberg dithering using fast LockBits
+        /// Converts with Floyd-Steinberg dithering using fast LockBits.
+        /// Pass forGrid=true when the output will be split into quadrants; this skips
+        /// the 2:1 aspect-ratio correction so the row count equals targetHeight.
         /// </summary>
-        public static string ConvertToAsciiDithered(Bitmap image, int targetWidth, int targetHeight)
+        public static string ConvertToAsciiDithered(Bitmap image, int targetWidth, int targetHeight, bool forGrid = false)
         {
-            int adjustedHeight = (int)(targetHeight * 0.55);
+            // For grid splits: generate targetHeight/2 rows so the full image is scaled into
+            // the 2×effectiveQuadH (= height/2) rows that WriteGridLCDs actually consumes.
+            int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight * 0.55);
 
             Bitmap resized = new Bitmap(targetWidth, adjustedHeight, PixelFormat.Format24bppRgb);
             using (Graphics g = Graphics.FromImage(resized))
@@ -631,6 +661,7 @@ namespace CCTVCapture
                 {
                     int idx = rowOffset + x * 3;
                     float lum = (pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f) / 255f;
+                    lum = (float)Math.Pow(lum, GRAYSCALE_GAMMA); // Shadow lift — see GRAYSCALE_GAMMA
                     lum = (lum - CONTRAST_MIDPOINT) * CONTRAST + CONTRAST_MIDPOINT;
                     grayscale[x, y] = lum < 0f ? 0f : (lum > 1f ? 1f : lum);
                 }
@@ -643,8 +674,9 @@ namespace CCTVCapture
                 {
                     float oldPixel = grayscale[x, y];
 
-                    // Quantize to nearest level
-                    int levels = RICH_RAMP.Length;
+                    // BLOCK_RAMP avoids the tartan artefact; dithering spreads quantisation error
+                    // across cells, compensating for the fewer gradation levels.
+                    int levels = BLOCK_RAMP.Length;
                     float newPixel = (float)Math.Round(oldPixel * (levels - 1)) / (levels - 1);
                     grayscale[x, y] = newPixel;
 
@@ -671,18 +703,18 @@ namespace CCTVCapture
             }
 
             // Convert to ASCII
-            StringBuilder result = new StringBuilder(targetWidth * adjustedHeight + adjustedHeight);
+                StringBuilder result = new StringBuilder(targetWidth * adjustedHeight + adjustedHeight);
 
-            for (int y = 0; y < adjustedHeight; y++)
-            {
-                for (int x = 0; x < targetWidth; x++)
+                for (int y = 0; y < adjustedHeight; y++)
                 {
-                    float brightness = grayscale[x, y];
-                    int charIndex = (int)(brightness * (RICH_RAMP.Length - 1) + 0.5f);
-                    charIndex = Math.Max(0, Math.Min(RICH_RAMP.Length - 1, charIndex));
+                    for (int x = 0; x < targetWidth; x++)
+                    {
+                        float brightness = grayscale[x, y];
+                        int charIndex = (int)(brightness * (BLOCK_RAMP.Length - 1) + 0.5f);
+                        charIndex = Math.Max(0, Math.Min(BLOCK_RAMP.Length - 1, charIndex));
 
-                    result.Append(RICH_RAMP[charIndex]);
-                }
+                        result.Append(BLOCK_RAMP[charIndex]);
+                    }
 
                 if (y < adjustedHeight - 1)
                     result.Append('\n');

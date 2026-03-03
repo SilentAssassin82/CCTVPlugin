@@ -515,8 +515,8 @@ namespace CCTVCapture
                             else
                             {
                                 string ascii = _useDithering
-                                    ? AsciiConverter.ConvertToAsciiDithered(frameToConvert, res, res)
-                                    : AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true);
+                                    ? AsciiConverter.ConvertToAsciiDithered(frameToConvert, res, res, forGrid: true)
+                                    : AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true, forGrid: true);
                                 compressed = AsciiConverter.CompressAscii(ascii);
                                 mode = "GRAYGZ";
                             }

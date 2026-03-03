@@ -585,7 +585,7 @@ namespace CCTVPlugin
 
                 case "GETCONFIG":
                     Log.Info($"Client requested config");
-                    Send($"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_captureWidth} CaptureHeight={_captureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} PostProcessMode={_config.PostProcessMode} LcdGridResolution={_config.LcdGridResolution}");
+                    Send($"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_captureWidth} CaptureHeight={_captureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}");
                     return;
 
                 case "CAMERA":
@@ -1179,9 +1179,23 @@ namespace CCTVPlugin
                 {
                     try
                     {
-                        // CPU-heavy: Base64 decode (runs on thread pool)
+                        // CPU-heavy: Base64 decode + optional GZip decompress (runs on thread pool)
                         byte[] bytes = Convert.FromBase64String(base64Data);
-                        string ascii = Encoding.UTF8.GetString(bytes);
+                        string ascii;
+                        if (mode.EndsWith("GZ", StringComparison.OrdinalIgnoreCase))
+                        {
+                            using (var ms = new MemoryStream(bytes))
+                            using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionMode.Decompress))
+                            using (var outMs = new MemoryStream(bytes.Length * 4))
+                            {
+                                gz.CopyTo(outMs);
+                                ascii = Encoding.UTF8.GetString(outMs.GetBuffer(), 0, (int)outMs.Length);
+                            }
+                        }
+                        else
+                        {
+                            ascii = Encoding.UTF8.GetString(bytes);
+                        }
 
                         // Queue the decoded frame for game thread to process
                         _processedFrameQueue.Enqueue(new ProcessedFrame
@@ -1249,14 +1263,16 @@ namespace CCTVPlugin
                         // 2×2 grid frame - split and write to 4 panels
                         int gridW = processedFrame.Width;
                         int gridH = processedFrame.Height;
-                        var (tl, tr, bl, br) = SplitFrameIntoQuadrants(processedFrame.DecodedAscii, gridW, gridH);
+                        bool isColorFrame = processedFrame.Mode.IndexOf("COLOR", StringComparison.OrdinalIgnoreCase) >= 0;
+                        var (tl, tr, bl, br) = SplitFrameIntoQuadrants(processedFrame.DecodedAscii, gridW, gridH, isColorFrame);
 
-                        int quadrantWidth = gridW / 2;
-                        int quadrantHeight = gridH / 2;
+                        int quadrantWidth  = gridW / 2;
+                        // Grayscale uses half the rows (aspect-ratio corrected), colour uses half the full height
+                        int quadrantHeight = isColorFrame ? gridH / 2 : gridH / 4;
 
-                        WriteToPanelGrid(lcdInfo.TopLeft, tl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TL");
-                        WriteToPanelGrid(lcdInfo.TopRight, tr, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TR");
-                        WriteToPanelGrid(lcdInfo.BottomLeft, bl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "BL");
+                        WriteToPanelGrid(lcdInfo.TopLeft,     tl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TL");
+                        WriteToPanelGrid(lcdInfo.TopRight,    tr, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TR");
+                        WriteToPanelGrid(lcdInfo.BottomLeft,  bl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "BL");
                         WriteToPanelGrid(lcdInfo.BottomRight, br, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "BR");
                     }
                     else if (processedFrame.IsSingleLcdFrame && lcdInfo.HasSingleLcd)
@@ -1277,14 +1293,15 @@ namespace CCTVPlugin
                         {
                             // Legacy: stretch to grid
                             const int GRID_SIZE = 362;
-                            var (tl, tr, bl, br) = SplitFrameIntoQuadrants(processedFrame.DecodedAscii, processedFrame.Width, processedFrame.Height);
+                            bool isColorFrame2 = processedFrame.Mode.IndexOf("COLOR", StringComparison.OrdinalIgnoreCase) >= 0;
+                            var (tl, tr, bl, br) = SplitFrameIntoQuadrants(processedFrame.DecodedAscii, processedFrame.Width, processedFrame.Height, isColorFrame2);
 
-                            int quadrantWidth = processedFrame.Width / 2;
-                            int quadrantHeight = processedFrame.Height / 2;
+                            int quadrantWidth  = processedFrame.Width / 2;
+                            int quadrantHeight = isColorFrame2 ? processedFrame.Height / 2 : processedFrame.Height / 4;
 
-                            WriteToPanelGrid(lcdInfo.TopLeft, tl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TL");
-                            WriteToPanelGrid(lcdInfo.TopRight, tr, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TR");
-                            WriteToPanelGrid(lcdInfo.BottomLeft, bl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "BL");
+                            WriteToPanelGrid(lcdInfo.TopLeft,     tl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TL");
+                            WriteToPanelGrid(lcdInfo.TopRight,    tr, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "TR");
+                            WriteToPanelGrid(lcdInfo.BottomLeft,  bl, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "BL");
                             WriteToPanelGrid(lcdInfo.BottomRight, br, processedFrame.Mode, quadrantWidth, quadrantHeight, processedFrame.CameraEntityId, "BR");
                         }
                     }
@@ -1428,7 +1445,8 @@ namespace CCTVPlugin
                     int gridSize = _config.LcdGridResolution;
                     Log.Debug($"[GRID RENDER] EntityId={cameraEntityId} Using {gridSize}×{gridSize} grid frame");
 
-                    var (tl, tr, bl, br) = SplitFrameIntoQuadrants(frame.GridFrame, gridSize, gridSize);
+                    bool isColor = frame.Mode != null && !frame.Mode.Contains("GRAY");
+                    var (tl, tr, bl, br) = SplitFrameIntoQuadrants(frame.GridFrame, gridSize, gridSize, isColor);
 
                     int quadrantWidth = gridSize / 2;
                     int quadrantHeight = gridSize / 2;
@@ -1443,7 +1461,8 @@ namespace CCTVPlugin
                     // Fallback to legacy single-frame mode
                     Log.Debug($"[GRID RENDER] EntityId={cameraEntityId} Using legacy frame {frame.Width}×{frame.Height}");
 
-                    var (tl, tr, bl, br) = SplitFrameIntoQuadrants(frame.AsciiData, frame.Width, frame.Height);
+                    bool isColorLegacy = frame.Mode != null && !frame.Mode.Contains("GRAY");
+                    var (tl, tr, bl, br) = SplitFrameIntoQuadrants(frame.AsciiData, frame.Width, frame.Height, isColorLegacy);
 
                     int quadrantWidth = frame.Width / 2;
                     int quadrantHeight = frame.Height / 2;
@@ -1601,21 +1620,22 @@ namespace CCTVPlugin
                 else if (isThisPanelGridPanel)
                 {
                     // GRID PANEL: Auto-detect transparent vs regular LCD
-                    // Transparent LCDs need slightly LARGER font to overlap and hide seams
+                    // Transparent LCDs need slightly LARGER font to overlap and hide seams.
+                    // Grayscale chars are ~half the width of colour chars at the same font size
+                    // (SE Monospace 2:1 aspect ratio), so grayscale uses 2× the base grid font.
                     bool isTransparent = IsTransparentLcd(textPanel);
+                    bool isColorMode   = mode.IndexOf("COLOR", StringComparison.OrdinalIgnoreCase) >= 0;
+                    float baseGridFont = (_config?.GridFontSize ?? 0.1f) * (isColorMode ? 1f : 2f);
 
                     if (isTransparent)
                     {
-                        // Transparent LCD: Use LARGER font (1.12x default = 0.112)
-                        // Transparent LCDs have wider gaps, need bigger characters to overlap
-                        fontSize = (_config?.GridFontSize ?? 0.1f) * 1.12f;
-                        Log.Debug($"Grid panel ({position ?? "?"}): Transparent LCD detected, using font size {fontSize:F3}");
+                        fontSize = baseGridFont * 1.12f;
+                        Log.Debug($"Grid panel ({position ?? "?"}): Transparent LCD, font {fontSize:F3}");
                     }
                     else
                     {
-                        // Regular LCD: Use configured grid font size (0.1 default)
-                        fontSize = _config?.GridFontSize ?? 0.1f;
-                        Log.Debug($"Grid panel ({position ?? "?"}): Regular LCD, using font size {fontSize:F3}");
+                        fontSize = baseGridFont;
+                        Log.Debug($"Grid panel ({position ?? "?"}): Regular LCD, font {fontSize:F3}");
                     }
                 }
                 else
@@ -1937,13 +1957,19 @@ namespace CCTVPlugin
         /// <summary>
         /// Splits an ASCII frame into 4 quadrants for 2×2 LCD grid display
         /// </summary>
-        private (string topLeft, string topRight, string bottomLeft, string bottomRight) SplitFrameIntoQuadrants(string asciiFrame, int width, int height)
+        private (string topLeft, string topRight, string bottomLeft, string bottomRight) SplitFrameIntoQuadrants(string asciiFrame, int width, int height, bool isColor = true)
         {
             var lines = asciiFrame.Split(new[] { '\n' }, StringSplitOptions.None);
 
-            // Calculate split points (middle of frame)
-            int midHeight = height / 2;
             int midWidth = width / 2;
+
+            // SE Monospace grayscale chars have a ~2:1 height-to-width aspect ratio.
+            // At the same font size colour chars fill the full panel width, but grayscale
+            // chars are half as wide — so 181 grayscale chars only cover the left ~50%.
+            // The fix mirrors CCTVClientConnection.WriteGridLCDs: for grayscale use only
+            // the top-quarter of rows per quadrant (height/4) and display at 2× font size,
+            // which produces the same visual fill as colour at the normal font size.
+            int midHeight = isColor ? height / 2 : height / 4;
 
             var tlBuilder = new StringBuilder();
             var trBuilder = new StringBuilder();
@@ -1966,23 +1992,36 @@ namespace CCTVPlugin
                 {
                     // Top-left quadrant
                     if (line.Length >= midWidth)
-                        tlBuilder.Append(line.Substring(0, midWidth)).Append('\n');
+                    {
+                        tlBuilder.Append(line.Substring(0, midWidth));
+                        if (y < midHeight - 1) tlBuilder.Append('\n');
+                    }
 
                     // Top-right quadrant
                     if (line.Length >= width)
-                        trBuilder.Append(line.Substring(midWidth, width - midWidth)).Append('\n');
+                    {
+                        trBuilder.Append(line.Substring(midWidth, width - midWidth));
+                        if (y < midHeight - 1) trBuilder.Append('\n');
+                    }
                 }
                 // Bottom half
-                else if (y < height)
+                else if (y < midHeight * 2)
                 {
                     // Bottom-left quadrant
                     if (line.Length >= midWidth)
-                        blBuilder.Append(line.Substring(0, midWidth)).Append('\n');
+                    {
+                        blBuilder.Append(line.Substring(0, midWidth));
+                        if (y < midHeight * 2 - 1) blBuilder.Append('\n');
+                    }
 
                     // Bottom-right quadrant
                     if (line.Length >= width)
-                        brBuilder.Append(line.Substring(midWidth, width - midWidth)).Append('\n');
+                    {
+                        brBuilder.Append(line.Substring(midWidth, width - midWidth));
+                        if (y < midHeight * 2 - 1) brBuilder.Append('\n');
+                    }
                 }
+                // Rows beyond 2×midHeight are discarded (only relevant for grayscale)
             }
 
             return (tlBuilder.ToString(), trBuilder.ToString(), blBuilder.ToString(), brBuilder.ToString());

@@ -225,7 +225,7 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - **Camera loops** — group cameras into `_L1`/`_L2` sets; Next Loop / Prev Loop switches the active group on the same LCD with no stale frame
 - **Auto HUD mode** — LCDs on moving (non-static) grids automatically receive a fully transparent background, turning the feed into a cockpit HUD overlay
 - Pre-emptive teleport — GOTO sent ahead of the display switch to hide latency
-- Adaptive cycle timing — EWMA of settle times, floored at the configured interval
+- Adaptive cycle timing — EWMA of settle times, floored at the configured interval; resets automatically on every loop switch so the new loop's cameras re-tune independently
 - Proximity gate — LCD writes pause automatically when no players are nearby
 - LCD reference caching — entity scans only on startup and rescan, not per frame
 
@@ -238,6 +238,12 @@ Check camera names start with the configured `CameraPrefix`. A rescan runs every
 
 **Slave LCDs not updating**
 The slave LCD's grid must have a powered, broadcasting radio antenna. Without one the grid is excluded at rescan time. Enable an antenna on the grid and wait for the next rescan (`CameraRescanTicks` ticks).
+
+**LCDs stop updating after switching to a new loop**
+The settle-time EWMA now resets on every loop switch. If you were on an older build, update to the latest release — the fix ensures the new loop's cycle interval starts at the 3-second conservative default and re-tunes itself rather than inheriting a potentially very long value from the previous loop.
+
+**LCDs stop updating shortly after enabling grayscale dithering**
+This was caused by an `IndexOutOfRangeException` in the dithering path on any frame with medium-to-bright content. Fixed in the latest build — update `CCTVCapture.exe`.
 
 **LCDs not updating**
 Verify the LCD custom name matches the pattern exactly: `{LcdPrefix} {camera base name}`. Names are case-insensitive.
@@ -253,6 +259,16 @@ Set `SpectatorSteamId` to the Steam ID of the fake client account. Ensure the cl
 
 **CCTVCapture.exe not connecting**
 Confirm the port matches the plugin config and no firewall is blocking it. For multi-client setups pass `--port XXXX` to each `CCTVCapture.exe` instance.
+
+---
+
+## Changelog
+
+### Latest build
+- **Fix — loop switch cameras stopping after a while:** When switching loops (e.g. L1 → L2) the settle-time EWMA and observation counter are now reset so the new loop's auto-cycle interval adapts fresh from its 3-second conservative default instead of inheriting a potentially extended value tuned for the previous loop's camera positions.
+- **Fix — missed teleport after rescan during loop cycling:** Stale pre-teleport state (`_preTeleportSent` / `_nextCameraIndexForPreTP`) is now cleared whenever a periodic rescan rebuilds the camera list. Previously, if a rescan fired between a pre-emptive GOTO and the actual display switch, the cycle could incorrectly treat the TP as already sent and skip it — leaving the spectator at the wrong camera.
+- **Fix — grayscale dithering crash on bright scenes:** `ConvertToAsciiDithered` used `RICH_RAMP.Length - 1` (= 9) to compute and clamp the character index, then indexed into `BLOCK_RAMP` which only has 5 elements. Any frame with a pixel brighter than ~44% grey caused an `IndexOutOfRangeException`, silently killing the async frame task and halting LCD updates. Index arithmetic now uses `BLOCK_RAMP.Length - 1` throughout.
+- **Color dithering strength restored to 1.0:** `DITHER_STRENGTH` in `ConvertToColorCharsDithered` is `1.0f` (full Floyd-Steinberg error propagation) for best overall image quality on SE's 8-level palette. The previous 0.75 reduction suppressed rainbow fringing on hard colour edges at the cost of visible banding; full strength is the better trade-off.
 
 ---
 
