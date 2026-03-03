@@ -333,8 +333,8 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Advance to the next camera loop (_L1 → _L2 → ... → _L1).
-		/// No-op when only one loop exists.
+		/// Advance to the next camera loop (_L1 → _L2 → ...).
+		/// No-op when only one loop exists or already at the last loop.
 		/// </summary>
 		public void NextLoop()
 		{
@@ -344,13 +344,18 @@ namespace CCTVPlugin
 				return;
 			}
 			int idx = _availableLoops.IndexOf(_currentLoopIndex);
-			_currentLoopIndex = _availableLoops[(idx + 1) % _availableLoops.Count];
+			if (idx >= _availableLoops.Count - 1)
+			{
+				Log.Info($"[{Name}] NextLoop: already at last loop (_L{_currentLoopIndex}), nothing to switch");
+				return;
+			}
+			_currentLoopIndex = _availableLoops[idx + 1];
 			SwitchToLoop();
 		}
 
 		/// <summary>
-		/// Go back to the previous camera loop.
-		/// No-op when only one loop exists.
+		/// Go back to the previous camera loop (... → _L2 → _L1).
+		/// No-op when only one loop exists or already at the first loop.
 		/// </summary>
 		public void PrevLoop()
 		{
@@ -360,7 +365,12 @@ namespace CCTVPlugin
 				return;
 			}
 			int idx = _availableLoops.IndexOf(_currentLoopIndex);
-			_currentLoopIndex = _availableLoops[(idx - 1 + _availableLoops.Count) % _availableLoops.Count];
+			if (idx <= 0)
+			{
+				Log.Info($"[{Name}] PrevLoop: already at first loop (_L{_currentLoopIndex}), nothing to switch");
+				return;
+			}
+			_currentLoopIndex = _availableLoops[idx - 1];
 			SwitchToLoop();
 		}
 
@@ -1340,7 +1350,10 @@ namespace CCTVPlugin
 			if (isOnDynamicGrid)
 				Log.Debug($"[{Name}] 🚗 HUD mode: LCD '{lcd.CustomName}' is on a dynamic grid — transparent background applied");
 
-			lcd.WriteText(content);
+			// Auto-heatmap: remap SE color chars to a thermal palette for dynamic-grid HUD LCDs.
+			// No config toggle — any moving-grid LCD automatically gets the infrared look.
+			string writeContent = (isOnDynamicGrid && isColor) ? RemapToHeatmap(content) : content;
+			lcd.WriteText(writeContent);
 			lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
 			lcd.Font = "Monospace";
 			lcd.FontSize = fontSize;
@@ -1357,9 +1370,56 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
+		/// Remaps every SE color character in a frame string to a thermal heatmap palette.
+		/// Each char's packed 3-bit RGB is decoded, converted to luminance, then mapped
+		/// through black→blue→cyan→yellow→red and re-encoded as an SE color char.
+		/// Applied automatically to single LCDs on non-static (moving) grids so the HUD
+		/// feed gets an infrared look without any player-facing config option.
+		/// </summary>
+		private static string RemapToHeatmap(string content)
+		{
+			const int SE_BASE = 0xE100;
+			var sb = new System.Text.StringBuilder(content.Length);
+
+			foreach (char c in content)
+			{
+				// SE color chars occupy 0xE100–0xE2FF (9-bit index: RRR GGG BBB)
+				if (c >= 0xE100 && c <= 0xE2FF)
+				{
+					int index = c - SE_BASE;
+					float r7 = (index >> 6) & 7;
+					float g7 = (index >> 3) & 7;
+					float b7 = index & 7;
+
+					// Luminance (0-1) from the 0-7 channel values
+					float lum = (r7 * 0.299f + g7 * 0.587f + b7 * 0.114f) / 7f;
+
+					// Map through black→blue→cyan→yellow→red
+					float fr, fg, fb;
+					if (lum < 0.25f)      { float s = lum * 4f;           fr = 0; fg = 0; fb = s; }
+					else if (lum < 0.5f)  { float s = (lum - 0.25f) * 4f; fr = 0; fg = s; fb = 1; }
+					else if (lum < 0.75f) { float s = (lum - 0.5f)  * 4f; fr = s; fg = 1; fb = 1 - s; }
+					else                  { float s = (lum - 0.75f) * 4f; fr = 1; fg = 1 - s; fb = 0; }
+
+					// Quantize back to 3-bit per channel and re-encode
+					int nr = Math.Max(0, Math.Min(7, (int)(fr * 7f + 0.5f)));
+					int ng = Math.Max(0, Math.Min(7, (int)(fg * 7f + 0.5f)));
+					int nb = Math.Max(0, Math.Min(7, (int)(fb * 7f + 0.5f)));
+					sb.Append((char)(SE_BASE + ((nr << 6) | (ng << 3) | nb)));
+				}
+				else
+				{
+					sb.Append(c);
+				}
+			}
+
+			return sb.ToString();
+		}
+
+		/// <summary>
 		/// Copy master LCD content to slave LCDs.
 		/// A slave is any LCD whose name starts with the master's name (case-insensitive) and
-		/// contains "_slave" anywhere after it — e.g. "LCD_TV Test01_TL_Slave",
+		/// contains "_slave" anywhere after it
 		/// "LCD_TV Test01_TL_SLAVE1", "LCD_TV Test01_TL_Slave_GridB", etc.
 		/// Uses a single entity scan for all quadrants to avoid per-frame spam.
 		/// </summary>
