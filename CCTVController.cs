@@ -10,6 +10,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Linq;
 using System.Threading.Tasks;
 using VRage.Game;
@@ -26,6 +27,16 @@ namespace CCTVPlugin
     public class CCTVPlugin
     {
         private static readonly ILogger Log = LogManager.GetCurrentClassLogger();
+
+        // Matches a trailing "_L{n}" loop suffix on a camera display name.
+        // Used to resolve the base LCD name when cameras are named e.g. "Test02_L1".
+        private static readonly Regex _loopSuffixRegex =
+            new Regex(@"_L(\d+)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static string StripLoopSuffix(string name) =>
+            _loopSuffixRegex.IsMatch(name)
+                ? name.Substring(0, _loopSuffixRegex.Match(name).Index)
+                : name;
 
         // Legacy single-client fields (for backward compatibility)
         private readonly string _cameraPrefix;
@@ -1726,6 +1737,9 @@ namespace CCTVPlugin
                 string cameraName = cameraInfo.DisplayName;
                 long cameraGridId = cameraInfo.GridEntityId;
 
+                // Strip _L{n} loop suffix so "Test02_L1" matches LCD "LCD_TV Test02".
+                string lcdBaseName = StripLoopSuffix(cameraName);
+
                 var grids = MyEntities.GetEntities().OfType<MyCubeGrid>();
 
                 // Track MASTER panels (first found) and SLAVE panels (all others with _SLAVE suffix)
@@ -1763,7 +1777,7 @@ namespace CCTVPlugin
                         }
 
                         // Check for single LCD match
-                        if (string.Equals(matchName, cameraName, StringComparison.OrdinalIgnoreCase))
+                        if (string.Equals(matchName, lcdBaseName, StringComparison.OrdinalIgnoreCase))
                         {
                             if (isSlave)
                             {
@@ -1785,7 +1799,7 @@ namespace CCTVPlugin
                         }
 
                         // Check for grid mode suffixes
-                        if (matchName.Equals($"{cameraName}_TL", StringComparison.OrdinalIgnoreCase))
+                        if (matchName.Equals($"{lcdBaseName}_TL", StringComparison.OrdinalIgnoreCase))
                         {
                             if (isSlave)
                             {
@@ -1805,7 +1819,7 @@ namespace CCTVPlugin
                                 Log.Debug($"[LCD Scan] Found MASTER grid panel (TL): '{lcdName}' on grid '{grid.DisplayName}'");
                             }
                         }
-                        else if (matchName.Equals($"{cameraName}_TR", StringComparison.OrdinalIgnoreCase))
+                        else if (matchName.Equals($"{lcdBaseName}_TR", StringComparison.OrdinalIgnoreCase))
                         {
                             if (isSlave)
                             {
@@ -1825,7 +1839,7 @@ namespace CCTVPlugin
                                 Log.Debug($"[LCD Scan] Found MASTER grid panel (TR): '{lcdName}' on grid '{grid.DisplayName}'");
                             }
                         }
-                        else if (matchName.Equals($"{cameraName}_BL", StringComparison.OrdinalIgnoreCase))
+                        else if (matchName.Equals($"{lcdBaseName}_BL", StringComparison.OrdinalIgnoreCase))
                         {
                             if (isSlave)
                             {
@@ -1845,7 +1859,7 @@ namespace CCTVPlugin
                                 Log.Debug($"[LCD Scan] Found MASTER grid panel (BL): '{lcdName}' on grid '{grid.DisplayName}'");
                             }
                         }
-                        else if (matchName.Equals($"{cameraName}_BR", StringComparison.OrdinalIgnoreCase))
+                        else if (matchName.Equals($"{lcdBaseName}_BR", StringComparison.OrdinalIgnoreCase))
                         {
                             if (isSlave)
                             {
