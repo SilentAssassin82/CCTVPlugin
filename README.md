@@ -54,7 +54,12 @@ Camera and LCD names follow a prefix + base-name pattern:
 | `LCD_TVCamera Test01` | `LCD_TV Test01` | `LCD_TV Test01_TL/TR/BL/BR` |
 | `LCD_TVCamera Hangar` | `LCD_TV Hangar` | `LCD_TV Hangar_TL/TR/BL/BR` |
 
-Slave LCDs (copies of a master) can be named `LCD_TV Test01_TL_Slave`, `LCD_TV Test01_TL_Slave2`, etc.
+Slave LCDs (copies of a master) follow the same naming pattern for both types:
+
+| Master | Slave examples |
+|---|---|
+| `LCD_TV Test01` | `LCD_TV Test01_Slave`, `LCD_TV Test01_Slave2` |
+| `LCD_TV Test01_TL` | `LCD_TV Test01_TL_Slave`, `LCD_TV Test01_TL_Slave2` |
 
 > **Antenna required for slave LCDs:** A slave LCD's grid must have at least one active, broadcasting radio antenna. Grids without a powered antenna are skipped automatically at rescan time.
 
@@ -214,7 +219,7 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - True color video — SE's hidden 0xE100 palette (512 colors, 9-bit RGB)
 - GZip frame compression (~14× ratio over uncompressed; negligible bandwidth)
 - 181×181 single LCD and 362×362 2×2 grid modes
-- Slave LCD support — any number of copies per quadrant panel; slave grids require an active antenna
+- Slave LCD support — single slaves (`LCD_TV Test01_Slave`) and grid quadrant slaves (`LCD_TV Test01_TL_Slave`); any number per master; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
 - **Button panel control** — Next / Prev / Reset actions assignable to any in-game button panel via G-menu
 - **Camera loops** — group cameras into `_L1`/`_L2` sets; Next Loop / Prev Loop switches the active group on the same LCD with no stale frame
