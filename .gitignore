@@ -13,6 +13,14 @@ net48/
 *.pdb
 *.exe
 
+# Release zips produced by package-release.ps1
+*.zip
+
+# Legacy / scratch folders — not part of the project
+DEPLOY/
+DebugMod/
+FakeClientCommon/
+
 # Visual Studio
 *.user
 *.suo
