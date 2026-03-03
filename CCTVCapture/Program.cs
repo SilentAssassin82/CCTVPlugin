@@ -28,6 +28,7 @@ namespace CCTVCapture
         private static bool _useColorMode = true;
         private static bool _useDithering = false;
         private static CCTVCommon.PostProcessMode _postProcessMode = CCTVCommon.PostProcessMode.None;
+        private static CCTVCommon.PostProcessMode _gridPostProcessMode = CCTVCommon.PostProcessMode.LightBlur;
 
         // Track current camera's LCD setup (for dual-resolution rendering)
         private static bool _currentCameraHasSingleLcd = false;
@@ -367,6 +368,10 @@ namespace CCTVCapture
                             if (Enum.TryParse<CCTVCommon.PostProcessMode>(val, out var mode))
                                 _postProcessMode = mode;
                             break;
+                        case "GridPostProcessMode":
+                            if (Enum.TryParse<CCTVCommon.PostProcessMode>(val, out var gridMode))
+                                _gridPostProcessMode = gridMode;
+                            break;
                         case "LcdGridResolution":
                             if (int.TryParse(val, out int gridRes))
                             {
@@ -405,28 +410,44 @@ namespace CCTVCapture
                     return;
                 }
 
-                // Apply post-processing filter if enabled
-                Bitmap processed = capture;
-                if (_postProcessMode != CCTVCommon.PostProcessMode.None)
-                {
-                    processed = AsciiConverter.ApplyPostProcess(capture, _postProcessMode);
-                    if (processed != capture)
-                        capture.Dispose(); // Dispose original if a new bitmap was created
-                }
-
                 // ⚡ PARALLEL DUAL-FRAME RENDERING: Render both resolutions simultaneously
                 // This is 30-50% faster than sequential rendering for dual-frame mode
 
                 // IMPORTANT: Create resized bitmaps on main thread FIRST
                 // (Bitmap is not thread-safe - can't read from multiple threads)
+                // Post-processing is applied per resolution after resize:
+                //   singleFrame uses _postProcessMode (default: None for sharp single LCD)
+                //   gridFrame   uses _gridPostProcessMode (default: LightBlur for smooth grid)
                 Bitmap singleFrame = null;
                 Bitmap gridFrame = null;
 
                 if (_currentCameraHasSingleLcd)
-                    singleFrame = new Bitmap(processed, _lcdSingleRes, _lcdSingleRes);
+                {
+                    Bitmap resized = new Bitmap(capture, _lcdSingleRes, _lcdSingleRes);
+                    if (_postProcessMode != CCTVCommon.PostProcessMode.None)
+                    {
+                        singleFrame = AsciiConverter.ApplyPostProcess(resized, _postProcessMode);
+                        if (singleFrame != resized) resized.Dispose();
+                    }
+                    else
+                    {
+                        singleFrame = resized;
+                    }
+                }
 
                 if (_currentCameraHasGrid)
-                    gridFrame = new Bitmap(processed, _lcdGridRes, _lcdGridRes);
+                {
+                    Bitmap resized = new Bitmap(capture, _lcdGridRes, _lcdGridRes);
+                    if (_gridPostProcessMode != CCTVCommon.PostProcessMode.None)
+                    {
+                        gridFrame = AsciiConverter.ApplyPostProcess(resized, _gridPostProcessMode);
+                        if (gridFrame != resized) resized.Dispose();
+                    }
+                    else
+                    {
+                        gridFrame = resized;
+                    }
+                }
 
                 // Now parallelize the CPU-heavy ASCII conversion (thread-safe)
                 Task<(string compressed, string mode)> singleTask = null;
@@ -540,22 +561,30 @@ namespace CCTVCapture
                 // Fallback: If LCD types unknown, send configured resolution
                 if (!_currentCameraHasSingleLcd && !_currentCameraHasGrid)
                 {
+                    Bitmap fallbackSrc = capture;
+                    Bitmap fallbackProcessed = null;
+                    if (_postProcessMode != CCTVCommon.PostProcessMode.None)
+                    {
+                        fallbackProcessed = AsciiConverter.ApplyPostProcess(capture, _postProcessMode);
+                        fallbackSrc = fallbackProcessed;
+                    }
+
                     string compressed;
                     string frameMode;
 
                     if (_useColorMode)
                     {
                         string colorChars = _useDithering
-                            ? AsciiConverter.ConvertToColorCharsDithered(processed, _captureWidth, _captureHeight)
-                            : AsciiConverter.ConvertToColorChars(processed, _captureWidth, _captureHeight);
+                            ? AsciiConverter.ConvertToColorCharsDithered(fallbackSrc, _captureWidth, _captureHeight)
+                            : AsciiConverter.ConvertToColorChars(fallbackSrc, _captureWidth, _captureHeight);
                         compressed = AsciiConverter.CompressAscii(colorChars);
                         frameMode = "COLORGZ";
                     }
                     else
                     {
                         string ascii = _useDithering
-                            ? AsciiConverter.ConvertToAsciiDithered(processed, _captureWidth, _captureHeight)
-                            : AsciiConverter.ConvertToAscii(processed, _captureWidth, _captureHeight, useBlockMode: true);
+                            ? AsciiConverter.ConvertToAsciiDithered(fallbackSrc, _captureWidth, _captureHeight)
+                            : AsciiConverter.ConvertToAscii(fallbackSrc, _captureWidth, _captureHeight, useBlockMode: true);
                         compressed = AsciiConverter.CompressAscii(ascii);
                         frameMode = "GRAYGZ";
                     }
@@ -566,9 +595,10 @@ namespace CCTVCapture
                         Console.WriteLine($">> FRAME {_captureWidth} {_captureHeight} {frameMode} ... ({frameCommand.Length} bytes) [Legacy]");
 
                     _writer.WriteLine(frameCommand);
+                    fallbackProcessed?.Dispose();
                 }
 
-                processed.Dispose();
+                capture.Dispose();
             }
             catch (Exception ex)
             {

@@ -48,8 +48,9 @@ namespace CCTVCapture
         [ThreadStatic]
         private static float[] _bChannelBuf;
 
-        // Slight contrast boost for dark SE scenes (1.0 = no change, 1.3 = moderate boost)
-        private const float CONTRAST = 1.2f;
+        // Contrast multiplier for color conversion (1.0 = no change, 1.3 = moderate boost)
+        // Kept at 1.0 to avoid amplifying in-game SSAO/ambient noise into visible quantization artifacts
+        private const float CONTRAST = 1.0f;
         private const float CONTRAST_MIDPOINT = 0.5f;
 
         /// <summary>

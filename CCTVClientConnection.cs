@@ -638,6 +638,7 @@ namespace CCTVPlugin
 				string config = $"CONFIG CaptureWidth={_sharedConfig.CaptureWidth} CaptureHeight={_sharedConfig.CaptureHeight} " +
 							   $"CaptureFps={_sharedConfig.CaptureFps} UseColorMode={_sharedConfig.UseColorMode} " +
 							   $"UseDithering={_sharedConfig.UseDithering} PostProcessMode={_sharedConfig.PostProcessMode} " +
+							   $"GridPostProcessMode={_sharedConfig.GridPostProcessMode} " +
 							   $"LcdGridResolution={_sharedConfig.LcdGridResolution}";
 				Send(config);
 				return;

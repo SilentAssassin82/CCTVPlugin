@@ -236,9 +236,9 @@ namespace CCTVPlugin
 
             try
             {
-                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_captureWidth} CaptureHeight={_captureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} PostProcessMode={_config.PostProcessMode} LcdGridResolution={_config.LcdGridResolution}";
+                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_captureWidth} CaptureHeight={_captureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}";
                 Send(message);
-                Log.Info($"Sent CONFIG to fake client: {_captureWidth}x{_captureHeight} @{_captureFps}fps color={_useColorMode} dither={_useDithering} postproc={_config.PostProcessMode}");
+                Log.Info($"Sent CONFIG to fake client: {_captureWidth}x{_captureHeight} @{_captureFps}fps color={_useColorMode} dither={_useDithering} postproc={_config.PostProcessMode} gridPostProc={_config.GridPostProcessMode}");
             }
             catch (Exception ex)
             {

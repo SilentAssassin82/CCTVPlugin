@@ -30,6 +30,7 @@ namespace CCTVPlugin
         private float _fontScale = 1.0f;
         private bool _autoAdjustFontSize = true;
         private string _postProcessMode = "None";
+        private string _gridPostProcessMode = "LightBlur";
         private bool _enableVerboseFrameLogging = false;
         private float _gridFontSize = 0.1f;
         private float _proximityCheckRadius = 150f;
@@ -241,6 +242,17 @@ namespace CCTVPlugin
             set
             {
                 _postProcessMode = value;
+                OnPropertyChanged();
+            }
+        }
+
+        [XmlElement("GridPostProcessMode")]
+        public string GridPostProcessMode
+        {
+            get => _gridPostProcessMode;
+            set
+            {
+                _gridPostProcessMode = value;
                 OnPropertyChanged();
             }
         }
