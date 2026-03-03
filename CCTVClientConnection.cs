@@ -372,7 +372,7 @@ namespace CCTVPlugin
 			_cameraCycleTicks = 0;
 			_preTeleportSent = false;
 			_nextCameraIndexForPreTP = -1;
-			_isManualMode = true; // pause auto-cycle; player presses Reset to re-enable
+			_isManualMode = false; // keep auto-cycle running in the new loop
 
 			Log.Info($"[{Name}] 🔄 Switched to loop {(_currentLoopIndex == 0 ? "(none)" : $"_L{_currentLoopIndex}")} ({_cameras.Count} cameras)");
 
