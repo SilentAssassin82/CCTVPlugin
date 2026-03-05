@@ -27,6 +27,7 @@ namespace CCTVCapture
         private static int _captureIntervalMs = 500;
         private static bool _useColorMode = true;
         private static bool _useDithering = false;
+        private static CCTVCommon.DitherMode _ditherMode = CCTVCommon.DitherMode.None;
         private static CCTVCommon.PostProcessMode _postProcessMode = CCTVCommon.PostProcessMode.None;
         private static CCTVCommon.PostProcessMode _gridPostProcessMode = CCTVCommon.PostProcessMode.LightBlur;
 
@@ -383,7 +384,22 @@ namespace CCTVCapture
                             break;
                         case "UseDithering":
                             if (bool.TryParse(val, out bool dither))
+                            {
                                 _useDithering = dither;
+                                // Backward compat: if DitherMode hasn't been set yet,
+                                // map the legacy bool to Bayer (the original default)
+                                if (dither && _ditherMode == CCTVCommon.DitherMode.None)
+                                    _ditherMode = CCTVCommon.DitherMode.Bayer;
+                                else if (!dither)
+                                    _ditherMode = CCTVCommon.DitherMode.None;
+                            }
+                            break;
+                        case "DitherMode":
+                            if (Enum.TryParse<CCTVCommon.DitherMode>(val, out var ditherMode))
+                            {
+                                _ditherMode = ditherMode;
+                                _useDithering = ditherMode != CCTVCommon.DitherMode.None;
+                            }
                             break;
                         case "PostProcessMode":
                             if (Enum.TryParse<CCTVCommon.PostProcessMode>(val, out var mode))
@@ -396,7 +412,7 @@ namespace CCTVCapture
                         case "LcdGridResolution":
                             if (int.TryParse(val, out int gridRes))
                             {
-                                int clamped = Math.Max(64, Math.Min(362, gridRes));
+                                int clamped = Math.Max(64, Math.Min(484, gridRes));
                                 _lcdGridRes = (clamped % 2 != 0) ? clamped - 1 : clamped;
                                 _lcdSingleRes = _lcdGridRes / 2;
                             }
@@ -488,17 +504,37 @@ namespace CCTVCapture
 
                             if (_useColorMode)
                             {
-                                string colorChars = _useDithering
-                                    ? AsciiConverter.ConvertToColorCharsDithered(frameToConvert, res, res)
-                                    : AsciiConverter.ConvertToColorChars(frameToConvert, res, res);
+                                string colorChars;
+                                switch (_ditherMode)
+                                {
+                                    case CCTVCommon.DitherMode.Bayer:
+                                        colorChars = AsciiConverter.ConvertToColorCharsOrdered(frameToConvert, res, res);
+                                        break;
+                                    case CCTVCommon.DitherMode.FloydSteinberg:
+                                        colorChars = AsciiConverter.ConvertToColorCharsDithered(frameToConvert, res, res);
+                                        break;
+                                    default:
+                                        colorChars = AsciiConverter.ConvertToColorChars(frameToConvert, res, res);
+                                        break;
+                                }
                                 compressed = AsciiConverter.CompressAscii(colorChars);
                                 mode = "COLORGZ";
                             }
                             else
                             {
-                                string ascii = _useDithering
-                                    ? AsciiConverter.ConvertToAsciiDithered(frameToConvert, res, res)
-                                    : AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true);
+                                string ascii;
+                                switch (_ditherMode)
+                                {
+                                    case CCTVCommon.DitherMode.Bayer:
+                                        ascii = AsciiConverter.ConvertToAsciiOrdered(frameToConvert, res, res);
+                                        break;
+                                    case CCTVCommon.DitherMode.FloydSteinberg:
+                                        ascii = AsciiConverter.ConvertToAsciiDithered(frameToConvert, res, res);
+                                        break;
+                                    default:
+                                        ascii = AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true);
+                                        break;
+                                }
                                 compressed = AsciiConverter.CompressAscii(ascii);
                                 mode = "GRAYGZ";
                             }
@@ -527,17 +563,37 @@ namespace CCTVCapture
 
                             if (_useColorMode)
                             {
-                                string colorChars = _useDithering
-                                    ? AsciiConverter.ConvertToColorCharsDithered(frameToConvert, res, res)
-                                    : AsciiConverter.ConvertToColorChars(frameToConvert, res, res);
+                                string colorChars;
+                                switch (_ditherMode)
+                                {
+                                    case CCTVCommon.DitherMode.Bayer:
+                                        colorChars = AsciiConverter.ConvertToColorCharsOrdered(frameToConvert, res, res);
+                                        break;
+                                    case CCTVCommon.DitherMode.FloydSteinberg:
+                                        colorChars = AsciiConverter.ConvertToColorCharsDithered(frameToConvert, res, res);
+                                        break;
+                                    default:
+                                        colorChars = AsciiConverter.ConvertToColorChars(frameToConvert, res, res);
+                                        break;
+                                }
                                 compressed = AsciiConverter.CompressAscii(colorChars);
                                 mode = "COLORGZ";
                             }
                             else
                             {
-                                string ascii = _useDithering
-                                    ? AsciiConverter.ConvertToAsciiDithered(frameToConvert, res, res, forGrid: true)
-                                    : AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true, forGrid: true);
+                                string ascii;
+                                switch (_ditherMode)
+                                {
+                                    case CCTVCommon.DitherMode.Bayer:
+                                        ascii = AsciiConverter.ConvertToAsciiOrdered(frameToConvert, res, res, forGrid: true);
+                                        break;
+                                    case CCTVCommon.DitherMode.FloydSteinberg:
+                                        ascii = AsciiConverter.ConvertToAsciiDithered(frameToConvert, res, res, forGrid: true);
+                                        break;
+                                    default:
+                                        ascii = AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true, forGrid: true);
+                                        break;
+                                }
                                 compressed = AsciiConverter.CompressAscii(ascii);
                                 mode = "GRAYGZ";
                             }
@@ -595,17 +651,37 @@ namespace CCTVCapture
 
                     if (_useColorMode)
                     {
-                        string colorChars = _useDithering
-                            ? AsciiConverter.ConvertToColorCharsDithered(fallbackSrc, _captureWidth, _captureHeight)
-                            : AsciiConverter.ConvertToColorChars(fallbackSrc, _captureWidth, _captureHeight);
+                        string colorChars;
+                        switch (_ditherMode)
+                        {
+                            case CCTVCommon.DitherMode.Bayer:
+                                colorChars = AsciiConverter.ConvertToColorCharsOrdered(fallbackSrc, _captureWidth, _captureHeight);
+                                break;
+                            case CCTVCommon.DitherMode.FloydSteinberg:
+                                colorChars = AsciiConverter.ConvertToColorCharsDithered(fallbackSrc, _captureWidth, _captureHeight);
+                                break;
+                            default:
+                                colorChars = AsciiConverter.ConvertToColorChars(fallbackSrc, _captureWidth, _captureHeight);
+                                break;
+                        }
                         compressed = AsciiConverter.CompressAscii(colorChars);
                         frameMode = "COLORGZ";
                     }
                     else
                     {
-                        string ascii = _useDithering
-                            ? AsciiConverter.ConvertToAsciiDithered(fallbackSrc, _captureWidth, _captureHeight)
-                            : AsciiConverter.ConvertToAscii(fallbackSrc, _captureWidth, _captureHeight, useBlockMode: true);
+                        string ascii;
+                        switch (_ditherMode)
+                        {
+                            case CCTVCommon.DitherMode.Bayer:
+                                ascii = AsciiConverter.ConvertToAsciiOrdered(fallbackSrc, _captureWidth, _captureHeight);
+                                break;
+                            case CCTVCommon.DitherMode.FloydSteinberg:
+                                ascii = AsciiConverter.ConvertToAsciiDithered(fallbackSrc, _captureWidth, _captureHeight);
+                                break;
+                            default:
+                                ascii = AsciiConverter.ConvertToAscii(fallbackSrc, _captureWidth, _captureHeight, useBlockMode: true);
+                                break;
+                        }
                         compressed = AsciiConverter.CompressAscii(ascii);
                         frameMode = "GRAYGZ";
                     }

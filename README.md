@@ -168,13 +168,23 @@ LCD_TVCamera Hangar  →  LCD_TV Hangar
 <SpectatorSteamId>YOUR_FAKE_CLIENT_STEAM_ID</SpectatorSteamId>
 <LcdPrefix>LCD_TV</LcdPrefix>
 <CameraPrefix>LCD_TVCamera</CameraPrefix>
-<CaptureWidth>181</CaptureWidth>
-<CaptureHeight>181</CaptureHeight>
+<LcdGridResolution>362</LcdGridResolution>
 <CaptureFps>2</CaptureFps>
 <UseColorMode>true</UseColorMode>
+<GridFontSize>0.1</GridFontSize>
+<GridVerticalOffset>0</GridVerticalOffset>
+<SingleLcdFontSize>0.080</SingleLcdFontSize>
 <ProximityCheckRadius>150</ProximityCheckRadius>
 <UseMultiClientMode>false</UseMultiClientMode>
 ```
+
+`LcdGridResolution` — output resolution for the 2×2 LCD grid (and capture). Must be an even number between 64 and 484. The single-LCD resolution is always half this value. Recommended: 362 for colour, 484 for grayscale. Changing this value automatically syncs `CaptureWidth` and `CaptureHeight`.
+
+`GridFontSize` — base font size for 2×2 grid panels (0.05–0.15). Grayscale automatically doubles this value.
+
+`GridVerticalOffset` — adds extra rows to the top grid panels (TL/TR) to close the vertical seam between top and bottom LCD panels (0–10 rows, default 0). Start with 1–2 and adjust in-game.
+
+`SingleLcdFontSize` — base font size for single LCD panels (0.05–0.15). Independent of grid font size.
 
 `ProximityCheckRadius` — distance in metres within which at least one player must be present for LCD writes to occur. Set to `0` to always write regardless of player position.
 
@@ -218,7 +228,9 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 
 - True color video — SE's hidden 0xE100 palette (512 colors, 9-bit RGB)
 - GZip frame compression (~14× ratio over uncompressed; negligible bandwidth)
-- 181×181 single LCD and 362×362 2×2 grid modes
+- Configurable LCD render resolution — single slider controls capture and grid resolution (single LCD = half)
+- 2×2 grid vertical offset — close the seam between top and bottom LCD panels without changing font size
+- Independent font size tuning — separate Grid Font Size and Single LCD Font Size controls
 - Slave LCD support — single slaves (`LCD_TV Test01_Slave`) and grid quadrant slaves (`LCD_TV Test01_TL_Slave`); any number per master; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
 - **Button panel control** — Next / Prev / Reset actions assignable to any in-game button panel via G-menu
@@ -264,7 +276,12 @@ Confirm the port matches the plugin config and no firewall is blocking it. For m
 
 ## Changelog
 
-### Latest build
+### v1.3.0
+- **Unified resolution control:** `LcdGridResolution` is now the single source of truth — changing it automatically syncs `CaptureWidth` and `CaptureHeight`. The separate Resolution Width/Height fields have been removed from the UI.
+- **Grid Vertical Offset:** New setting (`GridVerticalOffset`, 0–10 rows) adds extra rows to the top grid panels (TL/TR), pushing their content further down the LCD and closing the vertical seam between top and bottom panels. Adjustable via slider in the Torch UI.
+- **Independent font size controls:** `GridFontSize` and `SingleLcdFontSize` are now separately configurable via sliders, allowing the 2×2 grid and single LCD to be tuned independently.
+
+### Previous
 - **Fix — loop switch cameras stopping after a while:** When switching loops (e.g. L1 → L2) the settle-time EWMA and observation counter are now reset so the new loop's auto-cycle interval adapts fresh from its 3-second conservative default instead of inheriting a potentially extended value tuned for the previous loop's camera positions.
 - **Fix — missed teleport after rescan during loop cycling:** Stale pre-teleport state (`_preTeleportSent` / `_nextCameraIndexForPreTP`) is now cleared whenever a periodic rescan rebuilds the camera list. Previously, if a rescan fired between a pre-emptive GOTO and the actual display switch, the cycle could incorrectly treat the TP as already sent and skip it — leaving the spectator at the wrong camera.
 - **Fix — grayscale dithering crash on bright scenes:** `ConvertToAsciiDithered` used `RICH_RAMP.Length - 1` (= 9) to compute and clamp the character index, then indexed into `BLOCK_RAMP` which only has 5 elements. Any frame with a pixel brighter than ~44% grey caused an `IndexOutOfRangeException`, silently killing the async frame task and halting LCD updates. Index arithmetic now uses `BLOCK_RAMP.Length - 1` throughout.

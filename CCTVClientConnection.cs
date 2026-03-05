@@ -660,7 +660,8 @@ namespace CCTVPlugin
 			{
 				string config = $"CONFIG CaptureWidth={_sharedConfig.CaptureWidth} CaptureHeight={_sharedConfig.CaptureHeight} " +
 							   $"CaptureFps={_sharedConfig.CaptureFps} UseColorMode={_sharedConfig.UseColorMode} " +
-							   $"UseDithering={_sharedConfig.UseDithering} PostProcessMode={_sharedConfig.PostProcessMode} " +
+							   $"UseDithering={_sharedConfig.UseDithering} DitherMode={_sharedConfig.DitherMode} " +
+							   $"PostProcessMode={_sharedConfig.PostProcessMode} " +
 							   $"GridPostProcessMode={_sharedConfig.GridPostProcessMode} " +
 							   $"LcdGridResolution={_sharedConfig.LcdGridResolution}";
 				Send(config);
@@ -1131,17 +1132,15 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Auto-calculates the correct font size for a 181×181 single LCD panel,
-		/// matching the legacy single-client logic (base 0.1f color / 0.2f gray, scaled by FontScale).
+		/// Auto-calculates the correct font size for a single LCD panel using the
+		/// dedicated SingleLcdFontSize setting (independent of the 2×2 grid font).
 		/// </summary>
 		private float CalculateAutoFontSize(bool isColor)
 		{
-			const float REFERENCE_SIZE = 178f; // Legacy reference resolution
-			float lcdSize = _sharedConfig.LcdSingleResolution; // Actual frame resolution
-			float baseFont = isColor ? 0.1f : 0.2f;
-			float scale = REFERENCE_SIZE / lcdSize;
-			float fontSize = baseFont * scale;
-			if (!isColor) fontSize *= 1.05f;
+			// Single LCD uses its own font base so it can be tuned without affecting the grid.
+			//   colour    → SingleLcdFontSize × 1
+			//   grayscale → SingleLcdFontSize × 2  (SE Monospace chars are ~½ as wide as colour)
+			float fontSize = isColor ? _sharedConfig.SingleLcdFontSize : _sharedConfig.SingleLcdFontSize * 2f;
 			fontSize *= _sharedConfig.FontScale;
 			return Math.Max(0.03f, Math.Min(0.35f, fontSize));
 		}
@@ -1187,8 +1186,14 @@ namespace CCTVPlugin
 				effectiveQuadH  = quadH / 2;       // 90 rows per quadrant (2× font, full coverage)
 			}
 
-			string tlContent = ExtractQuadrant(lines, 0,     0,              quadW, effectiveQuadH);
-			string trContent = ExtractQuadrant(lines, quadW, 0,              quadW, effectiveQuadH);
+			// GridVerticalOffset adds extra rows to the top quadrants (TL/TR),
+			// pushing their content further down the LCD panel and closing the
+			// vertical seam between top and bottom physical panels.
+			int vOffset = Math.Min(_sharedConfig.GridVerticalOffset, effectiveQuadH);
+			int topQuadH = effectiveQuadH + vOffset;
+
+			string tlContent = ExtractQuadrant(lines, 0,     0,              quadW, topQuadH);
+			string trContent = ExtractQuadrant(lines, quadW, 0,              quadW, topQuadH);
 			string blContent = ExtractQuadrant(lines, 0,     effectiveQuadH, quadW, effectiveQuadH);
 			string brContent = ExtractQuadrant(lines, quadW, effectiveQuadH, quadW, effectiveQuadH);
 

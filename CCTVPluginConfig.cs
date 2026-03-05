@@ -27,12 +27,15 @@ namespace CCTVPlugin
         private int _displayFps = 2; // FPS for displaying frames on LCDs (can be lower than capture FPS)
         private bool _useColorMode = true;
         private bool _useDithering = false;
+        private string _ditherMode = "None";
         private float _fontScale = 1.0f;
         private bool _autoAdjustFontSize = true;
         private string _postProcessMode = "None";
         private string _gridPostProcessMode = "None";
         private bool _enableVerboseFrameLogging = false;
         private float _gridFontSize = 0.1f;
+        private int _gridVerticalOffset = 0;
+        private float _singleLcdFontSize = 0.080f;
         private float _proximityCheckRadius = 150f;
         private int _lcdGridResolution = 362;
 
@@ -155,6 +158,9 @@ namespace CCTVPlugin
             {
                 _captureWidth = value;
                 OnPropertyChanged();
+                // Keep grid resolution in sync
+                if (_lcdGridResolution != value)
+                    LcdGridResolution = value;
             }
         }
 
@@ -166,6 +172,9 @@ namespace CCTVPlugin
             {
                 _captureHeight = value;
                 OnPropertyChanged();
+                // Keep grid resolution in sync
+                if (_lcdGridResolution != value)
+                    LcdGridResolution = value;
             }
         }
 
@@ -198,18 +207,47 @@ namespace CCTVPlugin
             set
             {
                 _useColorMode = value;
+                // Grayscale gets higher resolution to match 512-colour char density (~29k chars/panel).
+                // Colour stays at 362 (32k chars/panel at 1 char per pixel).
+                _lcdGridResolution = value ? 362 : 484;
+                // Sync per-mode font defaults so each display type fills its panel correctly.
+                _gridFontSize       = value ? 0.1f   : 0.075f;
+                _singleLcdFontSize  = value ? 0.1f   : 0.080f;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(LcdGridResolution));
+                OnPropertyChanged(nameof(LcdSingleResolution));
+                OnPropertyChanged(nameof(GridFontSize));
+                OnPropertyChanged(nameof(SingleLcdFontSize));
             }
         }
 
         [XmlElement("UseDithering")]
         public bool UseDithering
         {
-            get => _useDithering;
+            get => _ditherMode != "None";
             set
             {
+                // Legacy setter: map bool to DitherMode for backward compat
+                if (value && _ditherMode == "None")
+                    _ditherMode = "Bayer";
+                else if (!value)
+                    _ditherMode = "None";
                 _useDithering = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(DitherMode));
+            }
+        }
+
+        [XmlElement("DitherMode")]
+        public string DitherMode
+        {
+            get => _ditherMode;
+            set
+            {
+                _ditherMode = string.IsNullOrWhiteSpace(value) ? "None" : value;
+                _useDithering = _ditherMode != "None";
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(UseDithering));
             }
         }
 
@@ -280,8 +318,43 @@ namespace CCTVPlugin
         }
 
         /// <summary>
+        /// Vertical row offset for the 2×2 grid bottom panels (BL/BR).
+        /// Positive values pull the bottom quadrants upward by N rows, closing the
+        /// vertical seam between the top and bottom LCD panels.
+        /// Range: 0–10 rows. Default: 0 (no offset).
+        /// </summary>
+        [XmlElement("GridVerticalOffset")]
+        public int GridVerticalOffset
+        {
+            get => _gridVerticalOffset;
+            set
+            {
+                _gridVerticalOffset = Math.Max(0, Math.Min(10, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Font size base for single LCD panels. Independent of GridFontSize so single
+        /// and grid displays can be tuned separately.
+        /// Grayscale renders at SingleLcdFontSize×2; colour at SingleLcdFontSize×1.
+        /// Auto-set by UseColorMode: 0.1 for colour, 0.080 for grayscale.
+        /// </summary>
+        [XmlElement("SingleLcdFontSize")]
+        public float SingleLcdFontSize
+        {
+            get => _singleLcdFontSize;
+            set
+            {
+                _singleLcdFontSize = Math.Max(0.05f, Math.Min(0.2f, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
         /// Output render resolution for the 2×2 LCD grid (width and height in characters).
-        /// Must be an even number between 64 and 362. The single-LCD resolution is always half of this value.
+        /// Must be an even number between 64 and 484. The single-LCD resolution is always half of this value.
+        /// Auto-set by UseColorMode: 362 for colour, 484 for grayscale.
         /// </summary>
         [XmlElement("LcdGridResolution")]
         public int LcdGridResolution
@@ -289,11 +362,23 @@ namespace CCTVPlugin
             get => _lcdGridResolution;
             set
             {
-                // Clamp to even number in [64, 362]
-                int clamped = Math.Max(64, Math.Min(362, value));
+                // Clamp to even number in [64, 484]
+                int clamped = Math.Max(64, Math.Min(484, value));
                 _lcdGridResolution = (clamped % 2 != 0) ? clamped - 1 : clamped;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(LcdSingleResolution));
+
+                // Keep capture resolution in sync — they must always match
+                if (_captureWidth != _lcdGridResolution)
+                {
+                    _captureWidth = _lcdGridResolution;
+                    OnPropertyChanged(nameof(CaptureWidth));
+                }
+                if (_captureHeight != _lcdGridResolution)
+                {
+                    _captureHeight = _lcdGridResolution;
+                    OnPropertyChanged(nameof(CaptureHeight));
+                }
             }
         }
 

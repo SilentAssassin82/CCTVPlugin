@@ -28,21 +28,11 @@
             <!-- Capture Settings -->
             <TextBlock Text="Capture" FontWeight="Bold" Margin="0,10,0,5"/>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                <TextBlock Text="Resolution Width:" Width="160" VerticalAlignment="Center"/>
-                <TextBox Width="80" Text="{Binding CaptureWidth, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBlock Text="  (64-512)" Foreground="Gray" VerticalAlignment="Center"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                <TextBlock Text="Resolution Height:" Width="160" VerticalAlignment="Center"/>
-                <TextBox Width="80" Text="{Binding CaptureHeight, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBlock Text="  (64-512)" Foreground="Gray" VerticalAlignment="Center"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="LCD Render Resolution:" Width="160" VerticalAlignment="Center"/>
-                <Slider Width="150" Minimum="64" Maximum="362" Value="{Binding LcdGridResolution}"
+                <Slider Width="150" Minimum="64" Maximum="484" Value="{Binding LcdGridResolution}"
                         TickFrequency="2" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding LcdGridResolution, StringFormat={}{0}px}" Width="45" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                <TextBlock Text="  (grid max 362px, single = half)" Foreground="Gray" VerticalAlignment="Center"/>
+                <TextBlock Text="  (auto: 362 colour / 484 grayscale, single = half)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Capture FPS:" Width="160" VerticalAlignment="Center"/>
@@ -60,9 +50,13 @@
                 <TextBlock Text="  (512-color SE palette)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                <TextBlock Text="Enable Dithering:" Width="160" VerticalAlignment="Center"/>
-                <CheckBox IsChecked="{Binding UseDithering}" VerticalAlignment="Center"/>
-                <TextBlock Text="  (smoother gradients, works in color and grayscale)" Foreground="Gray" VerticalAlignment="Center"/>
+                <TextBlock Text="Dithering:" Width="160" VerticalAlignment="Center"/>
+                <ComboBox Width="150" SelectedValue="{Binding DitherMode}" SelectedValuePath="Content" VerticalAlignment="Center">
+                    <ComboBoxItem Content="None"/>
+                    <ComboBoxItem Content="Bayer"/>
+                    <ComboBoxItem Content="FloydSteinberg"/>
+                </ComboBox>
+                <TextBlock Text="  (Bayer = stable, Floyd-Steinberg = smoother)" Foreground="Gray" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Post-Processing:" Width="160" VerticalAlignment="Center"/>
@@ -110,6 +104,20 @@
                         TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding GridFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (2×2 grid alignment)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Grid Vertical Offset:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="0" Maximum="10" Value="{Binding GridVerticalOffset}" 
+                        TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding GridVerticalOffset, StringFormat={}{0} rows}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (pull bottom panels up to close seam)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Single LCD Font Size:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="0.05" Maximum="0.15" Value="{Binding SingleLcdFontSize}" 
+                        TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding SingleLcdFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (single panel alignment)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <Separator Margin="0,10"/>
 

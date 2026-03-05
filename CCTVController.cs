@@ -236,9 +236,9 @@ namespace CCTVPlugin
 
             try
             {
-                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_captureWidth} CaptureHeight={_captureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}";
+                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}";
                 Send(message);
-                Log.Info($"Sent CONFIG to fake client: {_captureWidth}x{_captureHeight} @{_captureFps}fps color={_useColorMode} dither={_useDithering} postproc={_config.PostProcessMode} gridPostProc={_config.GridPostProcessMode}");
+                Log.Info($"Sent CONFIG to fake client: {_config.CaptureWidth}x{_config.CaptureHeight} @{_captureFps}fps color={_useColorMode} dither={_config.DitherMode} postproc={_config.PostProcessMode} gridPostProc={_config.GridPostProcessMode}");
             }
             catch (Exception ex)
             {
@@ -585,7 +585,7 @@ namespace CCTVPlugin
 
                 case "GETCONFIG":
                     Log.Info($"Client requested config");
-                    Send($"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_captureWidth} CaptureHeight={_captureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}");
+                    Send($"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}");
                     return;
 
                 case "CAMERA":
@@ -1599,17 +1599,14 @@ namespace CCTVPlugin
                 // Apply appropriate settings for THIS panel's type
                 if (isThisPanelSingleLcd)
                 {
-                    // SINGLE LCD: Always use UI settings, independent of grid
-                    // Ensure we calculate based on the ACTUAL frame size displayed (after downsampling)
+                    // SINGLE LCD: uses its own font base (SingleLcdFontSize) independent of
+                    // the grid so both can be tuned separately.
+                    // Grayscale: SingleLcdFontSize×2; colour: SingleLcdFontSize×1.
                     bool isColorMode = mode.IndexOf("COLOR", StringComparison.OrdinalIgnoreCase) >= 0;
                     if (_autoAdjustFontSize)
                     {
-                        float baseFont = isColorMode ? 0.1f : 0.2f;
-                        float widthScale = 178f / Math.Max(1, width);
-                        float heightScale = 178f / Math.Max(1, height);
-                        fontSize = baseFont * (float)Math.Sqrt(widthScale * heightScale);
-                        if (!isColorMode) fontSize *= 1.05f;
-                        fontSize *= _fontScale;
+                        float baseFont = (_config?.SingleLcdFontSize ?? 0.080f) * (isColorMode ? 1f : 2f);
+                        fontSize = baseFont * _fontScale;
                         fontSize = Math.Max(0.03f, Math.Min(0.35f, fontSize));
                     }
                     else
@@ -1971,6 +1968,12 @@ namespace CCTVPlugin
             // which produces the same visual fill as colour at the normal font size.
             int midHeight = isColor ? height / 2 : height / 4;
 
+            // GridVerticalOffset adds extra rows to the top quadrants (TL/TR),
+            // pushing their content further down the LCD panel and closing the
+            // vertical seam between top and bottom physical panels.
+            int vOffset = Math.Min(_config.GridVerticalOffset, midHeight);
+            int topMidHeight = midHeight + vOffset;
+
             var tlBuilder = new StringBuilder();
             var trBuilder = new StringBuilder();
             var blBuilder = new StringBuilder();
@@ -1987,25 +1990,25 @@ namespace CCTVPlugin
                     line = line.PadRight(width, ' ');
                 }
 
-                // Top half
-                if (y < midHeight)
+                // Top half (+ extra rows from vertical offset)
+                if (y < topMidHeight)
                 {
                     // Top-left quadrant
                     if (line.Length >= midWidth)
                     {
                         tlBuilder.Append(line.Substring(0, midWidth));
-                        if (y < midHeight - 1) tlBuilder.Append('\n');
+                        if (y < topMidHeight - 1) tlBuilder.Append('\n');
                     }
 
                     // Top-right quadrant
                     if (line.Length >= width)
                     {
                         trBuilder.Append(line.Substring(midWidth, width - midWidth));
-                        if (y < midHeight - 1) trBuilder.Append('\n');
+                        if (y < topMidHeight - 1) trBuilder.Append('\n');
                     }
                 }
-                // Bottom half
-                else if (y < midHeight * 2)
+                // Bottom half (starts at original midHeight)
+                else if (y >= midHeight && y < midHeight * 2)
                 {
                     // Bottom-left quadrant
                     if (line.Length >= midWidth)
@@ -2319,22 +2322,22 @@ namespace CCTVPlugin
                 }
             }
 
-            if (hasGridSetup && (_captureWidth < _config.LcdGridResolution || _captureHeight < _config.LcdGridResolution))
+            if (hasGridSetup && (_config.CaptureWidth < _config.LcdGridResolution || _config.CaptureHeight < _config.LcdGridResolution))
             {
                 Log.Warn("⚠️ ═══════════════════════════════════════════════════════════════");
                 Log.Warn("⚠️  2×2 LCD GRID DETECTED - CAPTURE RESOLUTION TOO LOW!");
-                Log.Warn($"⚠️  Current: {_captureWidth}×{_captureHeight}");
+                Log.Warn($"⚠️  Current: {_config.CaptureWidth}×{_config.CaptureHeight}");
                 Log.Warn($"⚠️  Required: {_config.LcdGridResolution}×{_config.LcdGridResolution} (or higher)");
                 Log.Warn("⚠️");
                 Log.Warn("⚠️  Your 2×2 LCD grids will show pixelated/stretched images!");
                 Log.Warn("⚠️");
-                Log.Warn($"⚠️  FIX: Set CaptureWidth and CaptureHeight to {_config.LcdGridResolution} in your config");
+                Log.Warn($"⚠️  FIX: Set LCD Render Resolution to {_config.LcdGridResolution} in your config");
                 Log.Warn($"⚠️       Single LCDs will automatically downscale from {_config.LcdGridResolution}→{_config.LcdSingleResolution}");
                 Log.Warn("⚠️ ═══════════════════════════════════════════════════════════════");
             }
             else if (hasGridSetup)
             {
-                Log.Debug($"✅ 2×2 LCD grids detected - capture resolution OK ({_captureWidth}×{_captureHeight})");
+                Log.Debug($"✅ 2×2 LCD grids detected - capture resolution OK ({_config.CaptureWidth}×{_config.CaptureHeight})");
             }
         }
 

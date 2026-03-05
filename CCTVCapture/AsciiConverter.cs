@@ -36,6 +36,23 @@ namespace CCTVCapture
         {
             ' ', '░', '▒', '▓', '█'
         };
+ 
+
+        // Pre-normalised 4×4 Bayer ordered-dither matrix.
+        // Raw Bayer values (0-15) are divided by 16 then centred on zero,
+        // giving a range of [-0.5, +0.4375].  Applied per-pixel as:
+        //   brightness += _bayerNorm[y & 3, x & 3] / (rampLevels - 1)
+        // which shifts each pixel by ±(0.5 / rampLevels) before rounding —
+        // exactly one half-step — so neighbouring positions round to different
+        // levels.  Because the matrix is position-fixed, static parts of the
+        // video produce the same halftone pattern on every frame (no flicker).
+        private static readonly float[,] _bayerNorm =
+        {
+            { -0.5000f,  0.0000f, -0.3750f,  0.1250f },
+            {  0.2500f, -0.2500f,  0.3750f, -0.1250f },
+            { -0.3125f,  0.1875f, -0.4375f,  0.0625f },
+            {  0.4375f, -0.0625f,  0.3125f, -0.1875f }
+        };
 
         // Per-thread reusable channel buffers for Floyd-Steinberg dithering.
         // Avoids allocating three ~500 KB float arrays on the LOH on every frame.
@@ -47,6 +64,14 @@ namespace CCTVCapture
         private static float[] _gChannelBuf;
         [ThreadStatic]
         private static float[] _bChannelBuf;
+
+        // Bayer dither amplitude for the colour path (0 = no dither, 1 = full ±0.5-step range).
+        // Values below 1.0 compress the threshold range toward 0.5, so only pixels whose
+        // channel value is within (SCALE × 0.5) of a quantisation boundary get dithered.
+        // This reduces the visible 4×4 halftone pattern on smooth near-neutral areas
+        // (e.g. slightly cool sky) while still smoothing genuine colour transitions.
+        // 0.6 → threshold window ±0.28 step; pixels solidly inside a level stay put.
+        private const float BAYER_COLOR_SCALE = 0.6f;
 
         // Contrast boost applied to grayscale paths only (1.0 = no change, 1.3 = moderate boost).
         // NOT used for colour paths — boosting contrast before 3-bit quantisation pushes more
@@ -464,6 +489,85 @@ namespace CCTVCapture
         }
 
         /// <summary>
+        /// Converts a bitmap to SE color characters using 4×4 Bayer ordered dithering.
+        /// Uses the standard threshold-comparison form: for each channel the fractional
+        /// overshoot past its floor quantisation level is compared against the Bayer
+        /// threshold.  All three channels share the same threshold at each pixel position
+        /// so rounding decisions are correlated — this preserves the original hue and
+        /// prevents the cyan/magenta chromatic noise that decorrelated per-channel
+        /// thresholds produce on SE's coarse 3-bit-per-channel palette.
+        /// Because the matrix is position-fixed, static regions produce an identical
+        /// halftone pattern each frame — no temporal flickering.
+        /// </summary>
+        public static string ConvertToColorCharsOrdered(Bitmap image, int targetWidth, int targetHeight)
+        {
+            Bitmap resized = new Bitmap(targetWidth, targetHeight, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(resized))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(image, 0, 0, targetWidth, targetHeight);
+            }
+
+            BitmapData bmpData = resized.LockBits(
+                new Rectangle(0, 0, targetWidth, targetHeight),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format24bppRgb);
+
+            int stride = bmpData.Stride;
+            byte[] pixels = new byte[stride * targetHeight];
+            Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            resized.UnlockBits(bmpData);
+            resized.Dispose();
+
+            StringBuilder result = new StringBuilder((targetWidth + 1) * targetHeight);
+
+            for (int y = 0; y < targetHeight; y++)
+            {
+                int rowOffset = y * stride;
+                int by = y & 3;
+
+                for (int x = 0; x < targetWidth; x++)
+                {
+                    int idx = rowOffset + x * 3;
+                    // Format24bppRgb is BGR order.
+                    //
+                    // All three channels share the SAME Bayer threshold so the
+                    // rounding decision is correlated across R/G/B.  This preserves
+                    // the original pixel hue: a near-neutral gray dithers between
+                    // two neutral grays rather than sprouting false cyan/magenta
+                    // from independent per-channel rounding.
+                    float thresh = _bayerNorm[by, x & 3] * BAYER_COLOR_SCALE + 0.5f;
+
+                    float scaledR = pixels[idx + 2] / 255f * 7f;
+                    float scaledG = pixels[idx + 1] / 255f * 7f;
+                    float scaledB = pixels[idx    ] / 255f * 7f;
+
+                    int rFloor = (int)scaledR;
+                    int gFloor = (int)scaledG;
+                    int bFloor = (int)scaledB;
+
+                    int rInt = ((scaledR - rFloor) > thresh) ? rFloor + 1 : rFloor;
+                    int gInt = ((scaledG - gFloor) > thresh) ? gFloor + 1 : gFloor;
+                    int bInt = ((scaledB - bFloor) > thresh) ? bFloor + 1 : bFloor;
+
+                    if (rInt > 7) rInt = 7;
+                    if (gInt > 7) gInt = 7;
+                    if (bInt > 7) bInt = 7;
+
+                    result.Append((char)(SE_COLOR_BASE + ((rInt << 6) | (gInt << 3) | bInt)));
+                }
+
+                if (y < targetHeight - 1)
+                    result.Append('\n');
+            }
+
+            return result.ToString();
+        }
+
+        /// <summary>
         /// Converts a bitmap to grayscale ASCII using fast LockBits pixel access
         /// with contrast enhancement.
         /// Pass forGrid=true when the output will be split into quadrants; this skips
@@ -471,14 +575,14 @@ namespace CCTVCapture
         /// </summary>
         public static string ConvertToAscii(Bitmap image, int targetWidth, int targetHeight, bool useBlockMode = true, bool forGrid = false)
         {
-            char[] charRamp = RICH_RAMP;
+            char[] charRamp = WHIP_RAMP;
 
             // SE LCD characters are roughly 1:2 (width:height).
-            // For grid splits, WriteGridLCDs uses effectiveQuadH = height/4 (90 rows per
-            // quadrant at 2× font size). Generating targetHeight rows means only the top
-            // half of the source is ever displayed. Generating targetHeight/2 rows instead
-            // scales the full image into exactly 2×effectiveQuadH rows so every row is used.
-            int adjustedHeight = targetHeight / 2;
+            // Grid: targetHeight/2 fills exactly the 2×effectiveQuadH the grid consumes.
+            // Single: /2.1 trims ~5 rows vs /2 to prevent the bottom row being clipped —
+            // SE's Monospace chars are fractionally taller than 2:1 at the higher 484-grid
+            // resolution, causing a ~7% height overshoot with a straight /2 divisor.
+            int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight / 2.1f);
 
             // Resize image to target dimensions
             Bitmap resized = new Bitmap(targetWidth, adjustedHeight, PixelFormat.Format24bppRgb);
@@ -628,9 +732,9 @@ namespace CCTVCapture
         /// </summary>
         public static string ConvertToAsciiDithered(Bitmap image, int targetWidth, int targetHeight, bool forGrid = false)
         {
-            // For grid splits: generate targetHeight/2 rows so the full image is scaled into
-            // the 2×effectiveQuadH (= height/2) rows that WriteGridLCDs actually consumes.
-            int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight * 0.55);
+            // Grid: targetHeight/2 fills exactly the 2×effectiveQuadH the grid consumes.
+            // Single: /2.1 trims ~5 rows to prevent bottom clip (see ConvertToAscii comment).
+            int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight / 2.1f);
 
             Bitmap resized = new Bitmap(targetWidth, adjustedHeight, PixelFormat.Format24bppRgb);
             using (Graphics g = Graphics.FromImage(resized))
@@ -715,6 +819,88 @@ namespace CCTVCapture
 
                         result.Append(BLOCK_RAMP[charIndex]);
                     }
+
+                if (y < adjustedHeight - 1)
+                    result.Append('\n');
+            }
+
+            return result.ToString();
+        }
+
+        /// <summary>
+        /// Converts a bitmap to grayscale ASCII using 4×4 Bayer ordered dithering.
+        /// Unlike Floyd-Steinberg (which diffuses quantisation error sequentially),
+        /// Bayer dithering applies the same fixed threshold to the same pixel position
+        /// on every frame.  Static regions of the video produce an identical halftone
+        /// pattern each frame — no crawling or flickering between updates.
+        /// Also faster than Floyd-Steinberg: no sequential dependency, no per-frame
+        /// float[,] allocation.
+        /// </summary>
+        public static string ConvertToAsciiOrdered(Bitmap image, int targetWidth, int targetHeight, bool forGrid = false)
+        {
+            // SE LCD characters are roughly 1:2 (width:height).
+            // Grid: targetHeight/2 fills exactly the 2×effectiveQuadH the grid consumes.
+            // Single: /2.1 trims ~5 rows to prevent bottom clip (see ConvertToAscii comment).
+            int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight / 2.1f);
+
+            Bitmap resized = new Bitmap(targetWidth, adjustedHeight, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(resized))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(image, 0, 0, targetWidth, adjustedHeight);
+            }
+
+            BitmapData bmpData = resized.LockBits(
+                new Rectangle(0, 0, targetWidth, adjustedHeight),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format24bppRgb);
+
+            int stride = bmpData.Stride;
+            byte[] pixels = new byte[stride * adjustedHeight];
+            Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            resized.UnlockBits(bmpData);
+            resized.Dispose();
+
+            // LUT: byte luminance → normalised brightness after gamma + contrast.
+            // Avoids Math.Pow inside the tight per-pixel loop; Bayer perturbation
+            // is applied to the float result after the LUT lookup.
+            float[] lumLUT = new float[256];
+            for (int i = 0; i < 256; i++)
+            {
+                float lv = (float)Math.Pow(i / 255f, GRAYSCALE_GAMMA);
+                lv = (lv - CONTRAST_MIDPOINT) * CONTRAST + CONTRAST_MIDPOINT;
+                lumLUT[i] = lv < 0f ? 0f : (lv > 1f ? 1f : lv);
+            }
+
+            int   rampLen   = WHIP_RAMP.Length; // 8
+            float rampScale = rampLen - 1;        // 7.0f  (one quantisation step = ~0.143)
+
+            StringBuilder result = new StringBuilder((targetWidth + 1) * adjustedHeight);
+
+            for (int y = 0; y < adjustedHeight; y++)
+            {
+                int rowOffset = y * stride;
+                int by        = y & 3;
+
+                for (int x = 0; x < targetWidth; x++)
+                {
+                    int idx  = rowOffset + x * 3;
+                    int gray = (int)(pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f);
+                    if (gray > 255) gray = 255;
+
+                    // Apply Bayer threshold: shift brightness by ±(0.5/rampScale)
+                    // before rounding so adjacent positions resolve to different levels.
+                    float lum = lumLUT[gray] + _bayerNorm[by, x & 3] / rampScale;
+                    lum = lum < 0f ? 0f : (lum > 1f ? 1f : lum);
+
+                    int charIndex = (int)(lum * rampScale + 0.5f);
+                    if (charIndex >= rampLen) charIndex = rampLen - 1;
+
+                    result.Append(WHIP_RAMP[charIndex]);
+                }
 
                 if (y < adjustedHeight - 1)
                     result.Append('\n');
