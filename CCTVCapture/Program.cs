@@ -40,6 +40,13 @@ namespace CCTVCapture
         private static bool _verboseLogging = false;
         private static int _frameCounter = 0;
 
+        // Spectator mode tracking — prevents repeated F8 sends on every camera cycle.
+        // On a single-machine setup CCTVCapture shares the SE window with the player,
+        // so sending F8 on each cycle would toggle spectator mode mid-seat and lock them in.
+        // Once we've entered spectator mode, suppress further F8s until a CAMERA switch
+        // resets this flag (indicating the view needs re-acquiring after a teleport).
+        private static bool _spectatorModeActive = false;
+
         static void Main(string[] args)
         {
             // Parse command-line arguments
@@ -274,14 +281,28 @@ namespace CCTVCapture
                                 {
                                     Console.WriteLine($"[INFO] Camera index loaded: {_cameraIndex.Count} cameras");
                                 }
+                                // A CAMERA switch means the view is changing — spectator mode
+                                // must be re-confirmed after the teleport settles.
+                                else if (line.StartsWith("CAMERA "))
+                                {
+                                    _spectatorModeActive = false;
+                                }
                                 // Handle SPECTATOR command - re-enter spectator mode
                                 else if (line == "SPECTATOR")
                                 {
-                                    Console.WriteLine($"[INFO] Re-entering spectator mode...");
-                                    if (WindowsInputHelper.SendF8KeyToSpaceEngineers())
+                                    if (!_spectatorModeActive)
                                     {
-                                        Console.WriteLine("[SUCCESS] F8 sent - spectator mode re-activated");
-                                        Thread.Sleep(500);
+                                        Console.WriteLine($"[INFO] Re-entering spectator mode...");
+                                        if (WindowsInputHelper.SendF8KeyToSpaceEngineers())
+                                        {
+                                            Console.WriteLine("[SUCCESS] F8 sent - spectator mode re-activated");
+                                            _spectatorModeActive = true;
+                                            Thread.Sleep(500);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine("[INFO] SPECTATOR: already active, skipping F8");
                                     }
                                 }
                                 // Handle GOTO commands (notification only - server handles teleport)

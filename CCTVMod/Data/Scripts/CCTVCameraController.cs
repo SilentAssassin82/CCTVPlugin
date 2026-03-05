@@ -219,6 +219,22 @@ namespace CCTVMod
         {
             try
             {
+                // Guard: don't switch camera if the local player is currently seated
+                // in a vehicle or cockpit. SetCameraController(Entity) while seated
+                // puts the camera into entity-view mode and locks the player in the
+                // seat — normal exit keys stop working because the game interprets them
+                // as "exit camera" rather than "exit seat". This can happen if the
+                // SpectatorSteamId in the Torch plugin is accidentally set to the
+                // player's own account rather than the fake client's account.
+                //
+                // NOTE: Character.Parent returns the GRID (not the cockpit block) when
+                // seated, so "is IMyCockpit" always evaluates false and the old guard
+                // never fired. Use ControlledEntity instead — it IS the cockpit block
+                // while seated, and correctly implements IMyShipController.
+                var localPlayer = MyAPIGateway.Session.LocalHumanPlayer;
+                if (localPlayer?.Controller?.ControlledEntity is IMyShipController)
+                    return;
+
                 // Try to find the camera entity on the client
                 VRage.ModAPI.IMyEntity entity = MyAPIGateway.Entities.GetEntityById(entityId);
 
