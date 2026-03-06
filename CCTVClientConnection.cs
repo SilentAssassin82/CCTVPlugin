@@ -74,7 +74,8 @@ namespace CCTVPlugin
 		private const float SETTLE_EWMA_ALPHA = 0.25f;   // Blend rate: 0.25 = responds in ~4 cycles
 		private const float SETTLE_SAFETY_FACTOR = 1.5f; // Cycle must be 1.5× observed settle time
 		private const int MIN_CYCLE_TICKS = 120;          // 2s floor
-		private const int MAX_CYCLE_TICKS = 3600;         // 60s ceiling
+		private const int MAX_CYCLE_TICKS = 900;          // 15s ceiling (was 60s — too long, cameras appeared frozen)
+		private const float MAX_SETTLE_EWMA_MS = 10000f;  // 10s cap — discard outliers
 		private const int MIN_OBSERVATIONS = 3;           // Observations before auto-adjust kicks in
 
 		// Pre-emptive teleport: send GOTO to the next camera before display switches,
@@ -103,6 +104,19 @@ namespace CCTVPlugin
 		private bool _wasPlayerNearby = true;        // tracks last logged state
 		private int _proximityCheckTicks = 0;
 		private const int PROXIMITY_CHECK_INTERVAL = 300; // ticks between checks (~5 s at 60 TPS)
+
+		// Display FPS throttling: single and grid writes are staggered onto
+		// separate ticks so they never coincide, halving per-tick LCD work.
+		private int _singleDisplayTicks = 0;
+		private int _gridDisplayTicks;
+		private readonly int _displayFpsInterval;
+
+		// Persistent latest frame per resolution type.
+		// Populated by the cheap per-tick drain, consumed on display ticks.
+		private (int width, int height, string content, bool isColor) _pendingSingleFrame;
+		private (int width, int height, string content, bool isColor) _pendingGridFrame;
+		private bool _hasPendingSingleFrame;
+		private bool _hasPendingGridFrame;
 
 		// Connection state
 		public bool IsConnected => _client != null && _client.Connected;
@@ -136,6 +150,13 @@ namespace CCTVPlugin
 			int cycleSeconds = sharedConfig?.CameraCycleIntervalSeconds ?? 10;
 			_cameraCycleIntervalTicks = cycleSeconds * 60;
 			_dynamicCycleIntervalTicks = _cameraCycleIntervalTicks; // starts at configured value
+
+			// Display FPS: controls how often LCD writes occur (60 ticks / fps).
+			// Single and grid writes are staggered by half the interval so they
+			// never land on the same tick, keeping per-tick LCD work low.
+			int displayFps = Math.Max(1, sharedConfig?.DisplayFps ?? 2);
+			_displayFpsInterval = 60 / displayFps;
+			_gridDisplayTicks = _displayFpsInterval / 2;
 		}
 
 		/// <summary>
@@ -530,6 +551,14 @@ namespace CCTVPlugin
 						Log.Info($"[{Name}] ✅ Auth passed — CCTVCapture verified");
 						// --- end handshake ---
 
+						// Close previous client before accepting the new one so the old
+						// handler thread sees its connection die and exits cleanly.
+						var oldClient = _client;
+						if (oldClient != null)
+						{
+							try { oldClient.Close(); } catch { }
+						}
+
 						_client = candidate;
 						_stream = candidateStream;
 
@@ -591,13 +620,19 @@ namespace CCTVPlugin
 		/// </summary>
 		private void HandleClientMessages()
 		{
+			// Capture local references so the finally block only cleans up THIS
+			// connection, not a newer one that the listener may have accepted while
+			// this handler was still shutting down.
+			var myClient = _client;
+			var myStream = _stream;
+
 			try
 			{
 				// 🔧 CRITICAL FIX: Use larger buffer for StreamReader to handle 500KB FRAME messages
-				using (StreamReader reader = new StreamReader(_stream, Encoding.UTF8, false, 1024 * 1024)) // 1 MB buffer
+				using (StreamReader reader = new StreamReader(myStream, Encoding.UTF8, false, 1024 * 1024)) // 1 MB buffer
 				{
 					string line;
-					while (_isRunning && _client != null && _client.Connected && (line = reader.ReadLine()) != null)
+					while (_isRunning && myClient != null && myClient.Connected && (line = reader.ReadLine()) != null)
 					{
 						try
 						{
@@ -622,10 +657,15 @@ namespace CCTVPlugin
 			}
 			finally
 			{
-				_client?.Close();
-				_client = null;
-				_stream = null;
-				_lastSentCameraListSignature = null; // force full list re-send on next connection
+				// Only clear shared fields if they still point to OUR connection.
+				// A new client may have already connected and overwritten them.
+				if (_client == myClient)
+				{
+					_client = null;
+					_stream = null;
+					_lastSentCameraListSignature = null; // force full list re-send on next connection
+				}
+				myClient?.Close();
 			}
 		}
 
@@ -787,6 +827,14 @@ namespace CCTVPlugin
 									_awaitingFirstFrameAfterSwitch = false;
 									float settleMs = (float)(DateTime.UtcNow - _lastCameraSwitchTime).TotalMilliseconds;
 
+									// Discard extreme outliers (e.g. frame arrived after a long GC pause
+									// or network stall) to prevent the EWMA from ballooning.
+									if (settleMs > MAX_SETTLE_EWMA_MS)
+									{
+										Log.Info($"[{Name}] 📊 Settle outlier discarded: {settleMs:F0}ms (cap {MAX_SETTLE_EWMA_MS:F0}ms)");
+										settleMs = MAX_SETTLE_EWMA_MS;
+									}
+
 									_settleTimeObservations++;
 									if (_settleTimeObservations == 1)
 										_settleTimeEwmaMs = settleMs; // seed with first sample
@@ -902,34 +950,57 @@ namespace CCTVPlugin
 				}
 			}
 
-			// Process all queued frames
 			if (++_proximityCheckTicks >= PROXIMITY_CHECK_INTERVAL)
 			{
 				_proximityCheckTicks = 0;
 				CheckPlayerProximity();
 			}
 
-			int processedCount = 0;
-			while (true)
+			// ── 1. Drain queue every tick (cheap) ──────────────────────────────
+			// Keep the latest frame per resolution type in persistent fields so
+			// stale frames never accumulate and display ticks always have fresh data.
+			int gridRes = _sharedConfig.LcdGridResolution;
+			lock (_frameQueueLock)
 			{
-				(int width, int height, string content, bool isColor) frame;
-
-				lock (_frameQueueLock)
+				while (_frameQueue.Count > 0)
 				{
-					if (_frameQueue.Count == 0)
-						break;
-
-					frame = _frameQueue.Dequeue();
+					var frame = _frameQueue.Dequeue();
+					if (frame.width == gridRes && frame.height == gridRes)
+					{
+						_pendingGridFrame = frame;
+						_hasPendingGridFrame = true;
+					}
+					else
+					{
+						_pendingSingleFrame = frame;
+						_hasPendingSingleFrame = true;
+					}
 				}
-
-				processedCount++;
-				if (_anyPlayerNearby)
-					WriteFrameToLCDs(frame.width, frame.height, frame.content, frame.isColor);
 			}
 
-			if (processedCount > 0)
+			// ── 2. Staggered display ticks ────────────────────────────────────
+			// Single and grid writes fire on separate ticks (offset by half the
+			// interval) so at most ~5 LCD writes happen per tick, not ~10.
+			bool singleTick = (++_singleDisplayTicks >= _displayFpsInterval);
+			if (singleTick) _singleDisplayTicks = 0;
+
+			bool gridTick = (++_gridDisplayTicks >= _displayFpsInterval);
+			if (gridTick) _gridDisplayTicks = 0;
+
+			if (_anyPlayerNearby)
 			{
-				Log.Debug($"[{Name}] ⚙️ Processed {processedCount} frames from queue");
+				if (singleTick && _hasPendingSingleFrame)
+				{
+					WriteFrameToLCDs(_pendingSingleFrame.width, _pendingSingleFrame.height, _pendingSingleFrame.content, _pendingSingleFrame.isColor);
+					_hasPendingSingleFrame = false;
+					Log.Debug($"[{Name}] ⚙️ Single LCD write ({_pendingSingleFrame.width}×{_pendingSingleFrame.height})");
+				}
+				if (gridTick && _hasPendingGridFrame)
+				{
+					WriteFrameToLCDs(_pendingGridFrame.width, _pendingGridFrame.height, _pendingGridFrame.content, _pendingGridFrame.isColor);
+					_hasPendingGridFrame = false;
+					Log.Debug($"[{Name}] ⚙️ Grid LCD write ({_pendingGridFrame.width}×{_pendingGridFrame.height})");
+				}
 			}
 		}
 
@@ -999,16 +1070,19 @@ namespace CCTVPlugin
 					Vector3D up = cameraEntity.WorldMatrix.Up;
 
 					// Send multiplayer message to client-side mod to move spectator camera
-					// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
-					var ic = CultureInfo.InvariantCulture;
-					string gotoMessage = $"GOTO|{SteamId}|{camera.DisplayName}|{camera.EntityId}|" +
-									$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
-									$"{forward.X.ToString(ic)}|{forward.Y.ToString(ic)}|{forward.Z.ToString(ic)}|" +
-									$"{up.X.ToString(ic)}|{up.Y.ToString(ic)}|{up.Z.ToString(ic)}";
+						// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
+						var ic = CultureInfo.InvariantCulture;
+						string gotoMessage = $"GOTO|{SteamId}|{camera.DisplayName}|{camera.EntityId}|" +
+										$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
+										$"{forward.X.ToString(ic)}|{forward.Y.ToString(ic)}|{forward.Z.ToString(ic)}|" +
+										$"{up.X.ToString(ic)}|{up.Y.ToString(ic)}|{up.Z.ToString(ic)}";
 
-					byte[] data = System.Text.Encoding.UTF8.GetBytes(gotoMessage);
-					const ushort MESSAGE_ID = 12346;
-					MyAPIGateway.Multiplayer.SendMessageToOthers(MESSAGE_ID, data);
+						byte[] data = System.Text.Encoding.UTF8.GetBytes(gotoMessage);
+						const ushort MESSAGE_ID = 12346;
+						// Target only the spectator client — SendMessageToOthers broadcasts to
+						// ALL clients including the player, whose client-side message dispatch
+						// can interfere with cockpit seat transitions.
+						MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, SteamId);
 
 					Log.Info($"[{Name}] 📡 Sent GOTO message to mod for camera '{camera.DisplayName}' (SteamID: {SteamId})");
 				}

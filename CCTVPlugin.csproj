@@ -28,6 +28,7 @@
     </Page>
   </ItemGroup>
   <ItemGroup>
+    <None Include=".github\copilot-instructions.md" />
     <None Include="CCTVMod\Data\Scripts\CCTVCameraController.cs" />
   </ItemGroup>
 

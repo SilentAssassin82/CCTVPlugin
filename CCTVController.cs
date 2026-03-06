@@ -839,7 +839,7 @@ namespace CCTVPlugin
                 byte[] data = System.Text.Encoding.UTF8.GetBytes(message);
 
                 const ushort MESSAGE_ID = 12346;
-                MyAPIGateway.Multiplayer.SendMessageToOthers(MESSAGE_ID, data);
+                MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, _configuredSpectatorSteamId);
 
                 Log.Info($"📡 Sent camera position to fake client ({_configuredSpectatorSteamId}): {cameraName} entity={entityId}");
             }
@@ -1084,7 +1084,7 @@ namespace CCTVPlugin
                 string message = $"INDEX|{_configuredSpectatorSteamId}|{cameraName}|{position.X}|{position.Y}|{position.Z}";
                 byte[] data = System.Text.Encoding.UTF8.GetBytes(message);
                 const ushort MESSAGE_ID = 12346;
-                MyAPIGateway.Multiplayer.SendMessageToOthers(MESSAGE_ID, data);
+                MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, _configuredSpectatorSteamId);
             }
             catch (Exception ex)
             {
@@ -1101,7 +1101,7 @@ namespace CCTVPlugin
                 string message = $"INDEX_COMPLETE|{_configuredSpectatorSteamId}";
                 byte[] data = System.Text.Encoding.UTF8.GetBytes(message);
                 const ushort MESSAGE_ID = 12346;
-                MyAPIGateway.Multiplayer.SendMessageToOthers(MESSAGE_ID, data);
+                MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, _configuredSpectatorSteamId);
             }
             catch (Exception ex)
             {
