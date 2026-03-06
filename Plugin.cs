@@ -40,6 +40,7 @@ namespace CCTVPlugin
             Log.Info($"LCD Prefix: {_config.LcdPrefix}");
             Log.Info($"LCD Font Tint: {_config.LcdFontTint} (R,G,B)");
             Log.Info($"Capture: {_config.CaptureWidth}x{_config.CaptureHeight} @ {_config.CaptureFps} FPS, Color: {_config.UseColorMode}");
+            Log.Info($"Display FPS: {_config.DisplayFps} (capture:display ratio = {_config.CaptureFps}:{_config.DisplayFps})");
             if (_config.EnableAutoCameraCycling)
             {
                 Log.Info($"Camera cycle interval: {_config.CameraCycleIntervalSeconds} seconds");

@@ -75,7 +75,7 @@ namespace CCTVPlugin
         private bool _ctrlHandlerRegistered = false;
         private readonly ConcurrentQueue<Action> _pendingCameraActions = new ConcurrentQueue<Action>();
         private int _pbScanTicks = 0;
-        private const int PB_SCAN_INTERVAL = 60; // scan every ~1 second
+        private const int PB_SCAN_INTERVAL = 300; // scan every ~5 seconds (was 60 — caused heavy GC pressure)
 
         private readonly List<CameraInfo> _indexedCameras = new List<CameraInfo>();
         private readonly Dictionary<long, CameraInfo> _cameraByEntity = new Dictionary<long, CameraInfo>();
@@ -384,11 +384,26 @@ namespace CCTVPlugin
         /// </summary>
         private void ScanProgrammableBlocksForCommands()
         {
+            // Skip scan entirely when no connections have LiveFeedLcdName configured
+            // (button controls are impossible without it, and this scan is expensive)
+            bool anyLiveFeed = false;
+            foreach (var c in _clientConnections)
+            {
+                if (!string.IsNullOrEmpty(c.LiveFeedLcdName))
+                {
+                    anyLiveFeed = true;
+                    break;
+                }
+            }
+            if (!anyLiveFeed) return;
+
             try
             {
-                var grids = MyEntities.GetEntities().OfType<MyCubeGrid>();
-                foreach (var grid in grids)
+                var entities = MyEntities.GetEntities();
+                foreach (var entity in entities)
                 {
+                    var grid = entity as MyCubeGrid;
+                    if (grid == null) continue;
                     foreach (var block in grid.GetFatBlocks())
                     {
                         var pb = block as IMyProgrammableBlock;
@@ -2147,19 +2162,19 @@ namespace CCTVPlugin
                         continue;
 
                     // DEBUG: Log ALL cameras found (before prefix filter)
-                    Log.Info($"[SCAN] Found camera: '{customName}' on grid '{gridName}'");
+                    Log.Debug($"[SCAN] Found camera: '{customName}' on grid '{gridName}'");
 
                     // Check if it starts with our camera prefix
                     if (!customName.StartsWith(_cameraPrefix, StringComparison.OrdinalIgnoreCase))
                     {
-                        Log.Info($"[SCAN] REJECTED: '{customName}' (doesn't match prefix '{_cameraPrefix}')");
+                        Log.Debug($"[SCAN] REJECTED: '{customName}' (doesn't match prefix '{_cameraPrefix}')");
                         continue;
                     }
 
                     cameraBlockCount++;
                     long blockEntityId = camera.EntityId;
 
-                    Log.Info($"✅ [SCAN] ACCEPTED: '{customName}' EntityId={blockEntityId}");
+                    Log.Debug($"[SCAN] ACCEPTED: '{customName}' EntityId={blockEntityId}");
 
                     prefixMatchCount++;
 
@@ -2551,6 +2566,21 @@ namespace CCTVPlugin
                 try { MyAPIGateway.Multiplayer.UnregisterMessageHandler(CTRL_MESSAGE_ID, OnCameraControlMessage); } catch { }
                 _ctrlHandlerRegistered = false;
             }
+
+            // Stop all multi-client connections (listener threads + TCP)
+            foreach (var connection in _clientConnections)
+            {
+                try
+                {
+                    connection.Dispose();
+                    Log.Info($"Disposed connection: {connection.Name}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, $"Error disposing connection: {connection.Name}");
+                }
+            }
+            _clientConnections.Clear();
 
             CleanupClient();
             CleanupModClient();

@@ -98,6 +98,10 @@ namespace CCTVPlugin
 		private Dictionary<string, List<IMyTextPanel>> _cachedSlavesByQuad;
 		private string _cachedSlavesKey;
 
+		// Game thread ID — captured on first Update() call so TeleportToCamera can
+		// execute inline instead of deadlocking via InvokeBlocking.
+		private int _gameThreadId = -1;
+
 		// Proximity gate: skip LCD writes when no players are nearby.
 		// CCTVCapture keeps streaming; frames are drained and discarded until a player returns.
 		private bool _anyPlayerNearby = true;       // optimistic default so LCDs start active
@@ -896,6 +900,10 @@ namespace CCTVPlugin
 		/// </summary>
 		public void Update()
 		{
+			// Capture game thread ID on first call (Update is always on game thread)
+			if (_gameThreadId == -1)
+				_gameThreadId = Thread.CurrentThread.ManagedThreadId;
+
 			_updateCallCount++;
 
 			// Log update calls every 300 ticks (5 seconds) when connected
@@ -1045,6 +1053,8 @@ namespace CCTVPlugin
 		/// Teleport the fake client character to a camera's position.
 		/// Actually sends a multiplayer message to the client-side mod to move the spectator camera.
 		/// The character body never moves - only the spectator camera view changes.
+		/// Safe to call from any thread: executes directly on the game thread, or
+		/// marshals via Invoke when called from a background thread.
 		/// </summary>
 		private void TeleportToCamera(CameraInfo camera)
 		{
@@ -1054,7 +1064,7 @@ namespace CCTVPlugin
 				return;
 			}
 
-			_torch.InvokeBlocking(() =>
+			Action sendGoto = () =>
 			{
 				try
 				{
@@ -1069,28 +1079,37 @@ namespace CCTVPlugin
 					Vector3D forward = cameraEntity.WorldMatrix.Forward;
 					Vector3D up = cameraEntity.WorldMatrix.Up;
 
-					// Send multiplayer message to client-side mod to move spectator camera
-						// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
-						var ic = CultureInfo.InvariantCulture;
-						string gotoMessage = $"GOTO|{SteamId}|{camera.DisplayName}|{camera.EntityId}|" +
-										$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
-										$"{forward.X.ToString(ic)}|{forward.Y.ToString(ic)}|{forward.Z.ToString(ic)}|" +
-										$"{up.X.ToString(ic)}|{up.Y.ToString(ic)}|{up.Z.ToString(ic)}";
+					// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
+					var ic = CultureInfo.InvariantCulture;
+					string gotoMessage = $"GOTO|{SteamId}|{camera.DisplayName}|{camera.EntityId}|" +
+									$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
+									$"{forward.X.ToString(ic)}|{forward.Y.ToString(ic)}|{forward.Z.ToString(ic)}|" +
+									$"{up.X.ToString(ic)}|{up.Y.ToString(ic)}|{up.Z.ToString(ic)}";
 
-						byte[] data = System.Text.Encoding.UTF8.GetBytes(gotoMessage);
-						const ushort MESSAGE_ID = 12346;
-						// Target only the spectator client — SendMessageToOthers broadcasts to
-						// ALL clients including the player, whose client-side message dispatch
-						// can interfere with cockpit seat transitions.
-						MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, SteamId);
+					byte[] data = System.Text.Encoding.UTF8.GetBytes(gotoMessage);
+					const ushort MESSAGE_ID = 12346;
+					// Target only the spectator client — SendMessageToOthers broadcasts to
+					// ALL clients including the player, whose client-side message dispatch
+					// can interfere with cockpit seat transitions.
+					MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, SteamId);
 
-					Log.Info($"[{Name}] 📡 Sent GOTO message to mod for camera '{camera.DisplayName}' (SteamID: {SteamId})");
+					Log.Debug($"[{Name}] 📡 Sent GOTO message to mod for camera '{camera.DisplayName}' (SteamID: {SteamId})");
 				}
 				catch (Exception ex)
 				{
 					Log.Error(ex, $"[{Name}] Failed to send camera position to mod");
 				}
-			});
+			};
+
+			// Most callers (Update, CycleToNextCamera, ManualSwitch, UpdateCameras) are
+			// already on the game thread. Calling InvokeBlocking from the game thread
+			// deadlocks or creates an ever-growing task queue because the action can't
+			// execute until the current tick returns — but we're blocking waiting for it.
+			// Only use InvokeBlocking for the one background-thread caller (ListenForClients).
+			if (_gameThreadId >= 0 && Thread.CurrentThread.ManagedThreadId == _gameThreadId)
+				sendGoto();
+			else
+				_torch.InvokeBlocking(sendGoto);
 		}
 
 		/// <summary>

@@ -184,7 +184,8 @@ namespace CCTVPlugin
             get => _captureFps;
             set
             {
-                _captureFps = value;
+                _captureFps = Math.Max(1, value);
+                ValidateFpsRatio();
                 OnPropertyChanged();
             }
         }
@@ -196,6 +197,7 @@ namespace CCTVPlugin
             set
             {
                 _displayFps = Math.Max(1, Math.Min(value, 10)); // Clamp between 1-10 FPS
+                ValidateFpsRatio();
                 OnPropertyChanged();
             }
         }
@@ -400,6 +402,22 @@ namespace CCTVPlugin
             {
                 _proximityCheckRadius = Math.Max(0f, value);
                 OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Warns and auto-corrects when DisplayFps exceeds half of CaptureFps.
+        /// A 2:1 capture-to-display ratio keeps the game thread from backing up with LCD writes.
+        /// </summary>
+        private void ValidateFpsRatio()
+        {
+            int maxDisplay = Math.Max(1, _captureFps / 2);
+            if (_displayFps > maxDisplay)
+            {
+                Log.Warn($"⚠️ DisplayFps ({_displayFps}) is too high for CaptureFps ({_captureFps}). " +
+                         $"A 2:1 capture:display ratio is recommended to avoid game thread overload. " +
+                         $"Auto-correcting DisplayFps to {maxDisplay}.");
+                _displayFps = maxDisplay;
             }
         }
 
