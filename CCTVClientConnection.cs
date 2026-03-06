@@ -91,6 +91,9 @@ namespace CCTVPlugin
 		private readonly Queue<(int width, int height, string decodedContent, bool isColor)> _frameQueue = new Queue<(int, int, string, bool)>();
 		private readonly object _frameQueueLock = new object();
 
+		// Serialises TCP writes so the game thread and listener thread never interleave.
+		private readonly object _sendLock = new object();
+
 		// LCD panel cache — avoids per-frame entity scans.
 		// Invalidated by InvalidateLcdCache() on every camera rescan.
 		private readonly Dictionary<string, IMyTextPanel> _lcdCache =
@@ -468,19 +471,22 @@ namespace CCTVPlugin
 
 		/// <summary>
 		/// Send a command to the connected CCTVCapture.
+		/// Thread-safe: game thread and listener thread may both call this.
+		/// Respects SendTimeout so the game thread is never blocked indefinitely.
 		/// </summary>
 		public void Send(string message)
 		{
-			if (!IsConnected || _stream == null)
-			{
-				Log.Warn($"[{Name}] ⚠️ Cannot send '{message}' - not connected (stream null: {_stream == null})");
+			var stream = _stream; // local snapshot — avoids TOCTOU race
+			if (stream == null || !IsConnected)
 				return;
-			}
 
 			try
 			{
 				byte[] data = Encoding.UTF8.GetBytes(message + "\n");
-				_stream.Write(data, 0, data.Length);
+				lock (_sendLock)
+				{
+					stream.Write(data, 0, data.Length);
+				}
 				_messagesSent++;
 
 				// Log important messages
@@ -489,6 +495,16 @@ namespace CCTVPlugin
 					Log.Debug($"[{Name}] >> {message} (total sent: {_messagesSent})");
 				}
 			}
+			catch (IOException)
+			{
+				// Write timed out or client disconnected — don't block the game thread
+				Log.Warn($"[{Name}] Send timed out or client disconnected — dropping message");
+			}
+			catch (SocketException)
+			{
+				Log.Warn($"[{Name}] Socket error on send — client likely disconnected");
+			}
+			catch (ObjectDisposedException) { /* stream closed between null-check and write */ }
 			catch (Exception ex)
 			{
 				Log.Error(ex, $"[{Name}] Error sending message: {message}");
@@ -510,6 +526,7 @@ namespace CCTVPlugin
 						candidate.ReceiveBufferSize = 1024 * 1024;
 						candidate.SendBufferSize = 1024 * 1024;
 						candidate.NoDelay = true;
+						candidate.SendTimeout = 2000; // 2s — prevents game thread from blocking indefinitely on Write()
 
 						var candidateStream = candidate.GetStream();
 

@@ -272,6 +272,10 @@ namespace CCTVPlugin
                 // Register camera control message handler on first tick (MyAPIGateway ready by now)
                 if (!_ctrlHandlerRegistered)
                 {
+                    // MyAPIGateway members can be null during session load/transition
+                    if (MyAPIGateway.Utilities == null || MyAPIGateway.Multiplayer == null)
+                        return; // retry next tick
+
                     // Server-side (dedicated): button actions fire server-side and use SendModMessage
                     MyAPIGateway.Utilities.RegisterMessageHandler(CTRL_MOD_CHANNEL, OnCameraControlModMessage);
                     // Client-side (listen server / single-player): button actions send over network
@@ -308,7 +312,14 @@ namespace CCTVPlugin
                 if (++_scanTicks >= _cameraRescanTicks)
                 {
                     _scanTicks = 0;
-                    RescanCameras();
+                    try
+                    {
+                        RescanCameras();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Error during RescanCameras (entity state may have changed during auto-save)");
+                    }
                 }
 
                 return; // Skip legacy single-client logic
@@ -351,7 +362,14 @@ namespace CCTVPlugin
             if (++_scanTicks >= _cameraRescanTicks)
             {
                 _scanTicks = 0;
-                RescanCameras();
+                try
+                {
+                    RescanCameras();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Error during RescanCameras");
+                }
             }
 
             if (_enableHeartbeat && ++_heartbeatTicks >= _heartbeatIntervalTicks)
@@ -556,6 +574,8 @@ namespace CCTVPlugin
             _client = newClient;
             if (_client != null)
             {
+                _client.SendTimeout = 2000; // 2s — prevents game thread from blocking indefinitely
+                _client.NoDelay = true;
                 _stream = _client.GetStream();
                 _streamReader = new StreamReader(_stream, Encoding.UTF8);
                 Log.Info("CCTVPlugin: CCTVCapture.exe connected");
@@ -2112,11 +2132,6 @@ namespace CCTVPlugin
                 return;
             }
 
-            var entities = new HashSet<IMyEntity>();
-            MyAPIGateway.Entities.GetEntities(entities);
-
-            Log.Debug($"RescanCameras: Found {entities.Count} total entities");
-
             int cameraBlockCount = 0;
             int prefixMatchCount = 0;
 
@@ -2467,7 +2482,8 @@ namespace CCTVPlugin
 
         private void Send(string text)
         {
-            if (_client == null || _stream == null)
+            var stream = _stream; // local snapshot
+            if (_client == null || stream == null)
             {
                 return;
             }
@@ -2475,14 +2491,19 @@ namespace CCTVPlugin
             try
             {
                 byte[] data = Encoding.UTF8.GetBytes(text + "\n");
-                _stream.Write(data, 0, data.Length);
-                _stream.Flush();
+                stream.Write(data, 0, data.Length);
+                stream.Flush();
             }
             catch (IOException)
             {
-                // Client disconnected - clean up silently (normal operation)
+                // Write timed out or client disconnected
                 CleanupClient();
             }
+            catch (SocketException)
+            {
+                CleanupClient();
+            }
+            catch (ObjectDisposedException) { /* stream closed between check and write */ }
             catch (Exception ex)
             {
                 Log.Error(ex, "CCTVPlugin Send error");
