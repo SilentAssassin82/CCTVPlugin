@@ -574,7 +574,7 @@ namespace CCTVPlugin
             _client = newClient;
             if (_client != null)
             {
-                _client.SendTimeout = 2000; // 2s — prevents game thread from blocking indefinitely
+                _client.SendTimeout = 500; // 500ms — legacy mode fallback, shorter than multi-client
                 _client.NoDelay = true;
                 _stream = _client.GetStream();
                 _streamReader = new StreamReader(_stream, Encoding.UTF8);
@@ -2140,10 +2140,11 @@ namespace CCTVPlugin
             int totalBlocks = 0;
 
             // Get all cube grids using Torch's internal API
-            var grids = MyEntities.GetEntities().OfType<MyCubeGrid>();
-
-            foreach (var grid in grids)
+            // Manual cast avoids OfType<> LINQ which allocates an iterator per call
+            var entities = MyEntities.GetEntities();
+            foreach (var entity in entities)
             {
+                var grid = entity as MyCubeGrid;
                 if (grid == null)
                     continue;
 

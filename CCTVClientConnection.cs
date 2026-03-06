@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -93,6 +94,12 @@ namespace CCTVPlugin
 
 		// Serialises TCP writes so the game thread and listener thread never interleave.
 		private readonly object _sendLock = new object();
+
+		// Background send thread: game thread enqueues messages, send thread writes to TCP.
+		// This guarantees the game thread NEVER blocks on _stream.Write().
+		private readonly ConcurrentQueue<byte[]> _sendQueue = new ConcurrentQueue<byte[]>();
+		private readonly AutoResetEvent _sendEvent = new AutoResetEvent(false);
+		private const int MAX_SEND_QUEUE = 100;
 
 		// LCD panel cache — avoids per-frame entity scans.
 		// Invalidated by InvalidateLcdCache() on every camera rescan.
@@ -218,6 +225,7 @@ namespace CCTVPlugin
 				return;
 
 			_isRunning = false;
+			_sendEvent.Set(); // wake send thread so it exits
 
 			try
 			{
@@ -471,44 +479,67 @@ namespace CCTVPlugin
 
 		/// <summary>
 		/// Send a command to the connected CCTVCapture.
-		/// Thread-safe: game thread and listener thread may both call this.
-		/// Respects SendTimeout so the game thread is never blocked indefinitely.
+		/// Thread-safe and non-blocking: enqueues the message for a background send
+		/// thread so the game thread NEVER blocks on TCP writes.
 		/// </summary>
 		public void Send(string message)
 		{
-			var stream = _stream; // local snapshot — avoids TOCTOU race
-			if (stream == null || !IsConnected)
-				return;
+			if (!_isRunning) return;
 
-			try
-			{
-				byte[] data = Encoding.UTF8.GetBytes(message + "\n");
-				lock (_sendLock)
-				{
-					stream.Write(data, 0, data.Length);
-				}
-				_messagesSent++;
+			_sendQueue.Enqueue(Encoding.UTF8.GetBytes(message + "\n"));
 
-				// Log important messages
-				if (!message.StartsWith("CAMERA") || (_messagesSent % 10) == 0)
+			// Cap queue to prevent unbounded growth when client isn't reading
+			while (_sendQueue.Count > MAX_SEND_QUEUE)
+				_sendQueue.TryDequeue(out _);
+
+			_sendEvent.Set();
+		}
+
+		/// <summary>
+		/// Background thread that drains the send queue and writes to the TCP stream.
+		/// Runs alongside HandleClientMessages so the game thread never touches I/O.
+		/// </summary>
+		private void SendWorker()
+		{
+			Log.Info($"[{Name}] Send thread started");
+
+			while (_isRunning)
+			{
+				_sendEvent.WaitOne(500); // wake on signal or every 500ms
+
+				var stream = _stream;
+				if (stream == null) continue;
+
+				while (_sendQueue.TryDequeue(out var data))
 				{
-					Log.Debug($"[{Name}] >> {message} (total sent: {_messagesSent})");
+					try
+					{
+						lock (_sendLock)
+						{
+							stream.Write(data, 0, data.Length);
+						}
+						_messagesSent++;
+					}
+					catch (IOException)
+					{
+						Log.Warn($"[{Name}] Send worker: write failed (client disconnected or timeout)");
+						break;
+					}
+					catch (SocketException)
+					{
+						Log.Warn($"[{Name}] Send worker: socket error");
+						break;
+					}
+					catch (ObjectDisposedException) { break; }
+					catch (Exception ex)
+					{
+						Log.Error(ex, $"[{Name}] Send worker error");
+						break;
+					}
 				}
 			}
-			catch (IOException)
-			{
-				// Write timed out or client disconnected — don't block the game thread
-				Log.Warn($"[{Name}] Send timed out or client disconnected — dropping message");
-			}
-			catch (SocketException)
-			{
-				Log.Warn($"[{Name}] Socket error on send — client likely disconnected");
-			}
-			catch (ObjectDisposedException) { /* stream closed between null-check and write */ }
-			catch (Exception ex)
-			{
-				Log.Error(ex, $"[{Name}] Error sending message: {message}");
-			}
+
+			Log.Info($"[{Name}] Send thread exiting");
 		}
 
 		private void ListenForClients()
@@ -583,7 +614,18 @@ namespace CCTVPlugin
 						_client = candidate;
 						_stream = candidateStream;
 
+						// Clear stale messages from previous client's send queue
+						while (_sendQueue.TryDequeue(out _)) { }
+
 						Log.Info($"✅ [{Name}] CCTVCapture connected from {_client.Client.RemoteEndPoint}");
+
+						// Start background send thread BEFORE any Send() calls
+						Thread sendThread = new Thread(SendWorker)
+						{
+							IsBackground = true,
+							Name = $"CCTVCapture-{Name}-Sender"
+						};
+						sendThread.Start();
 
 						// Send welcome message
 						Send($"HELLO {Name} v1.0");
