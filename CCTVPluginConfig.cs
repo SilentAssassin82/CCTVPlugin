@@ -23,8 +23,8 @@ namespace CCTVPlugin
         private string _lcdFontTint = "255,255,255";
         private int _captureWidth = 178;
         private int _captureHeight = 178;
-        private int _captureFps = 2;
-        private int _displayFps = 2; // FPS for displaying frames on LCDs (can be lower than capture FPS)
+        private int _captureFps = 10;
+        private int _displayFps = 10; // FPS for displaying frames on LCDs (match capture FPS for maximum LCD refresh)
         private bool _useColorMode = true;
         private bool _useDithering = false;
         private string _ditherMode = "None";
@@ -406,18 +406,16 @@ namespace CCTVPlugin
         }
 
         /// <summary>
-        /// Warns and auto-corrects when DisplayFps exceeds half of CaptureFps.
-        /// A 2:1 capture-to-display ratio keeps the game thread from backing up with LCD writes.
+        /// Warns and auto-corrects when DisplayFps exceeds CaptureFps.
+        /// DisplayFps can now equal CaptureFps (1:1 ratio) for maximum LCD refresh.
         /// </summary>
         private void ValidateFpsRatio()
         {
-            int maxDisplay = Math.Max(1, _captureFps / 2);
-            if (_displayFps > maxDisplay)
+            if (_displayFps > _captureFps)
             {
-                Log.Warn($"⚠️ DisplayFps ({_displayFps}) is too high for CaptureFps ({_captureFps}). " +
-                         $"A 2:1 capture:display ratio is recommended to avoid game thread overload. " +
-                         $"Auto-correcting DisplayFps to {maxDisplay}.");
-                _displayFps = maxDisplay;
+                Log.Warn($"⚠️ DisplayFps ({_displayFps}) exceeds CaptureFps ({_captureFps}). " +
+                         $"Auto-correcting DisplayFps to {_captureFps}.");
+                _displayFps = _captureFps;
             }
         }
 

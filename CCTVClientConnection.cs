@@ -88,7 +88,7 @@ namespace CCTVPlugin
 		// Cleared by ResetAutoCycle() so the player can re-enable normal cycling.
 		private bool _isManualMode = false;
 
-		// Frame queue - decoded frames ready to write to LCDs (on game thread)
+		// Frame queue
 		private readonly Queue<(int width, int height, string decodedContent, bool isColor)> _frameQueue = new Queue<(int, int, string, bool)>();
 		private readonly object _frameQueueLock = new object();
 
@@ -131,6 +131,21 @@ namespace CCTVPlugin
 		private (int width, int height, string content, bool isColor) _pendingGridFrame;
 		private bool _hasPendingSingleFrame;
 		private bool _hasPendingGridFrame;
+
+		// LCD write diagnostics — counters reset on each heartbeat log so the values
+		// show per-interval rates.  Lets us see exactly where the frame pipeline
+		// stalls when a user reports "LCDs stopped updating".
+		private int _framesReceived;    // frames enqueued by ProcessClientMessage
+		private int _lcdWritesSingle;   // successful WriteSingleLCD calls (non-grid)
+		private int _lcdWritesGrid;     // successful WriteGridLCDs calls
+		private int _lcdMisses;          // FindLCDByName returned null during a write
+		private int _lcdEntityFails;     // FindLCDByName failed due to entity snapshot error
+
+		// Periodic LCD flush: every 10 minutes, toggle ContentType on all cached LCDs
+		// to force SE's renderer to rebuild the display.  Works around SE sometimes
+		// ignoring WriteText() visually despite the API call succeeding.
+		private int _lcdFlushTicks = 0;
+		private const int LCD_FLUSH_INTERVAL = 36000; // 10 minutes at 60 TPS
 
 		// Connection state
 		public bool IsConnected => _client != null && _client.Connected;
@@ -426,7 +441,7 @@ namespace CCTVPlugin
 			_nextCameraIndexForPreTP = -1;
 			_isManualMode = false; // keep auto-cycle running in the new loop
 
-			// Reset settle-time EWMA so the previous loop's timings don't carry over.
+			// Reset settle-time EWMA
 			// L2 cameras may be in completely different locations with different settle
 			// latencies; starting fresh avoids the cycle interval being wrongly
 			// extended (or shrunk) based on stale L1 observations.
@@ -446,7 +461,6 @@ namespace CCTVPlugin
 			// Jump to first camera in the new loop
 			_currentCameraEntityId = _cameras[0].EntityId;
 			Send("CAMERA 1");
-			Send("SPECTATOR");
 			TeleportToCamera(_cameras[0]);
 			_lastCameraSwitchTime = DateTime.UtcNow;
 			_awaitingFirstFrameAfterSwitch = true;
@@ -754,7 +768,6 @@ namespace CCTVPlugin
 			if (message == "PING")
 			{
 				Send("PONG");
-				Send("READY");
 				return;
 			}
 
@@ -806,9 +819,6 @@ namespace CCTVPlugin
 						Send($"OK Switched to {cam.DisplayName}");
 
 						Log.Info($"[{Name}] Switched to camera {camIndex + 1}/{_cameras.Count}: {cam.DisplayName}");
-
-						// Tell CCTVCapture.exe to re-enter spectator mode
-						Send("SPECTATOR");
 
 						// Teleport the character to the camera
 						TeleportToCamera(cam);
@@ -871,6 +881,7 @@ namespace CCTVPlugin
 								bool isColor = mode.Contains("COLOR");
 
 								// Queue for game thread processing
+								Interlocked.Increment(ref _framesReceived);
 								lock (_frameQueueLock)
 								{
 									_frameQueue.Enqueue((width, height, decodedContent, isColor));
@@ -969,17 +980,33 @@ namespace CCTVPlugin
 			if (IsConnected && (_updateCallCount % 300) == 0 && _updateCallCount != _lastLoggedUpdateCount)
 			{
 				_lastLoggedUpdateCount = _updateCallCount;
-				lock (_frameQueueLock)
-				{
-					Log.Info($"[{Name}] 🔄 Update() heartbeat: {_updateCallCount} calls, Queue: {_frameQueue.Count} frames, Camera: {_currentCameraIndex + 1}/{_cameras.Count}");
-				}
+				int queueCount;
+				lock (_frameQueueLock) { queueCount = _frameQueue.Count; }
+				int rxSnap = Interlocked.Exchange(ref _framesReceived, 0);
+				int wSingle = Interlocked.Exchange(ref _lcdWritesSingle, 0);
+				int wGrid   = Interlocked.Exchange(ref _lcdWritesGrid, 0);
+				int miss    = Interlocked.Exchange(ref _lcdMisses, 0);
+				int eFail   = Interlocked.Exchange(ref _lcdEntityFails, 0);
+				Log.Info($"[{Name}] 🔄 Heartbeat: cam {_currentCameraIndex + 1}/{_cameras.Count}, " +
+					$"cycle {_cameraCycleTicks}/{_dynamicCycleIntervalTicks}t, " +
+					$"manual={_isManualMode}, autoCycle={_sharedConfig.EnableAutoCameraCycling}, " +
+					$"queue={queueCount}, preTP={_preTeleportSent}, nearby={_anyPlayerNearby}, " +
+					$"rx={rxSnap}, lcdW={wSingle}+{wGrid}, miss={miss}, eFail={eFail}");
 			}
 
 			if (!IsConnected)
 				return;
 
 			// Auto-cycle cameras if enabled and not overridden by a manual button press
-			if (_sharedConfig.EnableAutoCameraCycling && _cameras.Count > 0 && !_isManualMode)
+			bool shouldCycle = _sharedConfig.EnableAutoCameraCycling && _cameras.Count > 0 && !_isManualMode;
+			if (!shouldCycle && (_updateCallCount % 600) == 0 && _cameras.Count > 0)
+			{
+				if (_isManualMode)
+					Log.Debug($"[{Name}] Cycling paused: manual mode active (use Reset to resume)");
+				else
+					Log.Warn($"[{Name}] ⚠️ Cycling paused: autoCycle={_sharedConfig.EnableAutoCameraCycling}, cameras={_cameras.Count}");
+			}
+			if (shouldCycle)
 			{
 				_cameraCycleTicks++;
 
@@ -1021,6 +1048,15 @@ namespace CCTVPlugin
 			{
 				_proximityCheckTicks = 0;
 				CheckPlayerProximity();
+			}
+
+			// Periodic LCD flush: toggle ContentType to NONE on all cached panels,
+			// forcing SE to tear down and rebuild their render state.
+			// The next WriteLCDContent call restores TEXT_AND_IMAGE automatically.
+			if (++_lcdFlushTicks >= LCD_FLUSH_INTERVAL)
+			{
+				_lcdFlushTicks = 0;
+				FlushLCDs();
 			}
 
 			// ── 1. Drain queue every tick (cheap) ──────────────────────────────
@@ -1095,9 +1131,6 @@ namespace CCTVPlugin
 
 			// Send camera switch command to CCTVCapture.exe
 			Send($"CAMERA {_currentCameraIndex + 1}");
-
-			// Tell CCTVCapture.exe to re-enter spectator mode
-			Send("SPECTATOR");
 
 			// Only teleport if we haven't already pre-teleported to this camera
 			if (!teleportAlreadySent)
@@ -1233,6 +1266,7 @@ namespace CCTVPlugin
 			var lcd = FindLCDByName(lcdName, silent: true);
 			if (lcd == null)
 			{
+				_lcdMisses++;
 				Log.Debug($"[{Name}] ⏭️ Skipping LCD '{lcdName}' - not present in world");
 				return;
 			}
@@ -1256,6 +1290,7 @@ namespace CCTVPlugin
 
 			Log.Debug($"[{Name}] ✅ Writing to single LCD '{lcdName}' ({content.Length} chars, color: {isColor}, fontSize: {fontSize:F3})");
 			WriteLCDContent(lcd, content, fontSize, isColor);
+			_lcdWritesSingle++;
 		}
 
 		/// <summary>
@@ -1368,6 +1403,8 @@ namespace CCTVPlugin
 			Log.Debug($"[{Name}] Writing BR quadrant to '{brLcdName}' ({brContent.Length} chars)");
 			WriteSingleLCD(brLcdName, brContent, isColor, gridFontSize);
 
+			_lcdWritesGrid++;
+
 			// Copy to slave LCDs
 			CopyToSlaveLCDs(lcdPrefix, baseName);
 		}
@@ -1441,21 +1478,36 @@ namespace CCTVPlugin
 			// Use MyEntities (Torch internal) rather than MyAPIGateway.Entities so that
 			// non-static (dynamic) grids — e.g. vehicles — are included in the scan.
 			// MyAPIGateway.Entities can miss dynamic grids in the Torch plugin context.
-			foreach (var grid in MyEntities.GetEntities().OfType<MyCubeGrid>())
+			// Snapshot to a list first: merge blocks / PB-driven grid splits can modify
+			// the live entity collection mid-iteration → InvalidOperationException.
+			List<MyCubeGrid> grids;
+			try { grids = MyEntities.GetEntities().OfType<MyCubeGrid>().ToList(); }
+			catch (InvalidOperationException)
 			{
-				if (grid == null) continue;
-				foreach (var block in grid.GetFatBlocks())
+				_lcdEntityFails++;
+				Log.Info($"[{Name}] FindLCDByName('{name}'): entity list changed mid-snapshot — returning null");
+				return null;
+			}
+
+			foreach (var grid in grids)
+			{
+				if (grid == null || grid.MarkedForClose) continue;
+				try
 				{
-					var lcd = block as IMyTextPanel;
-					if (lcd == null) continue;
-					totalLcds++;
-					if (lcd.CustomName == name)
+					foreach (var block in grid.GetFatBlocks())
 					{
-						foundLcd = lcd;
-						Log.Debug($"[{Name}] ✅ FOUND LCD: '{name}' (Grid: {grid.DisplayName}, Static: {grid.IsStatic})");
-						break;
+						var lcd = block as IMyTextPanel;
+						if (lcd == null) continue;
+						totalLcds++;
+						if (lcd.CustomName == name)
+						{
+							foundLcd = lcd;
+							Log.Debug($"[{Name}] ✅ FOUND LCD: '{name}' (Grid: {grid.DisplayName}, Static: {grid.IsStatic})");
+							break;
+						}
 					}
 				}
+				catch (InvalidOperationException) { continue; } // grid blocks changed mid-iteration (merge/split)
 				if (foundLcd != null) break;
 			}
 
@@ -1469,18 +1521,22 @@ namespace CCTVPlugin
 				// Debug: List all available LCDs with a matching prefix to help diagnose naming issues
 				if (totalLcds > 0)
 				{
-					Log.Debug($"[{Name}] 🔍 Listing LCDs with prefix '{_config.LcdPrefix}':");
-					int count = 0;
-					foreach (var grid in MyEntities.GetEntities().OfType<MyCubeGrid>())
+					try
 					{
-						if (grid == null) continue;
-						foreach (var block in grid.GetFatBlocks())
+						Log.Debug($"[{Name}] 🔍 Listing LCDs with prefix '{_config.LcdPrefix}':");
+						int count = 0;
+						foreach (var grid in grids)
 						{
-							var lcd = block as IMyTextPanel;
-							if (lcd != null && (lcd.CustomName.Contains(_config.LcdPrefix) || lcd.CustomName.Contains("SLAVE")))
-								Log.Debug($"[{Name}]    #{++count}: '{lcd.CustomName}' (Grid: {grid.DisplayName}, Static: {grid.IsStatic})");
+							if (grid == null || grid.MarkedForClose) continue;
+							foreach (var block in grid.GetFatBlocks())
+							{
+								var lcd = block as IMyTextPanel;
+								if (lcd != null && (lcd.CustomName.Contains(_config.LcdPrefix) || lcd.CustomName.Contains("SLAVE")))
+									Log.Debug($"[{Name}]    #{++count}: '{lcd.CustomName}' (Grid: {grid.DisplayName}, Static: {grid.IsStatic})");
+							}
 						}
 					}
+					catch (InvalidOperationException) { } // grid changed mid-diagnostic scan — harmless
 				}
 			}
 
@@ -1495,35 +1551,58 @@ namespace CCTVPlugin
 			if (lcd == null)
 				return;
 
-			// Auto HUD mode: if the LCD is on a non-static (moving) grid, force a fully
-			// transparent background so the feed overlays the pilot's view instead of
-			// blocking it. Explicit LcdBackgroundAlpha config only applies to static grids.
-			bool isOnDynamicGrid = false;
-			try { isOnDynamicGrid = (lcd.CubeGrid as MyCubeGrid)?.IsStatic == false; }
-			catch { }
+			// Guard: the LCD's grid may have been destroyed or merged between the cache
+			// lookup and now (e.g. merge block / PB-triggered grid split). All property
+			// accesses below can throw if the block is orphaned.
+			try
+			{
+				if (lcd.CubeGrid == null || ((MyCubeGrid)lcd.CubeGrid).MarkedForClose)
+				{
+					Log.Debug($"[{Name}] ⏭️ LCD grid gone — skipping write");
+					return;
+				}
+			}
+			catch { return; }
 
-			int effectiveAlpha = isOnDynamicGrid ? 0 : Math.Max(0, Math.Min(255, _config.LcdBackgroundAlpha));
+			try
+			{
+				// Auto HUD mode: if the LCD is on a non-static (moving) grid, force a fully
+				// transparent background so the feed overlays the pilot's view instead of
+				// blocking it. Explicit LcdBackgroundAlpha config only applies to static grids.
+				bool isOnDynamicGrid = false;
+				try { isOnDynamicGrid = (lcd.CubeGrid as MyCubeGrid)?.IsStatic == false; }
+				catch { }
 
-			if (isOnDynamicGrid)
-				Log.Debug($"[{Name}] 🚗 HUD mode: LCD '{lcd.CustomName}' is on a dynamic grid — transparent background applied");
+				int effectiveAlpha = isOnDynamicGrid ? 0 : Math.Max(0, Math.Min(255, _config.LcdBackgroundAlpha));
 
-			// Auto-heatmap: remap SE color chars to a thermal palette for dynamic-grid HUD LCDs.
-			// No config toggle — any moving-grid LCD automatically gets the infrared look.
-			string writeContent = (isOnDynamicGrid && isColor) ? RemapToHeatmap(content) : content;
-			lcd.WriteText(writeContent);
-			lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
-			lcd.Font = "Monospace";
-			lcd.FontSize = fontSize;
-			lcd.TextPadding = 0f;
-			lcd.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.LEFT;
-			lcd.BackgroundColor = new Color(0, 0, 0, (byte)effectiveAlpha);
+				if (isOnDynamicGrid)
+					Log.Debug($"[{Name}] 🚗 HUD mode: LCD '{lcd.CustomName}' is on a dynamic grid — transparent background applied");
 
-			// SE color chars encode their own color — white font lets them render correctly.
-			// Grayscale uses the configured font tint instead.
-			if (isColor)
-				lcd.FontColor = new Color(255, 255, 255);
-			else
-				lcd.FontColor = ParseColor(_sharedConfig.LcdFontTint);
+				// Auto-heatmap: remap SE color chars to a thermal palette for dynamic-grid HUD LCDs.
+				// No config toggle — any moving-grid LCD automatically gets the infrared look.
+				string writeContent = (isOnDynamicGrid && isColor) ? RemapToHeatmap(content) : content;
+				lcd.WriteText(writeContent);
+				lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
+				lcd.Font = "Monospace";
+				lcd.FontSize = fontSize;
+				lcd.TextPadding = 0f;
+				lcd.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.LEFT;
+				lcd.BackgroundColor = new Color(0, 0, 0, (byte)effectiveAlpha);
+
+				// SE color chars encode their own color — white font lets them render correctly.
+				// Grayscale uses the configured font tint instead.
+				if (isColor)
+					lcd.FontColor = new Color(255, 255, 255);
+				else
+					lcd.FontColor = ParseColor(_sharedConfig.LcdFontTint);
+			}
+			catch (Exception ex)
+			{
+				// LCD became invalid mid-write (grid merged/split/destroyed).
+				// Evict from cache so the next frame does a fresh scan.
+				Log.Debug($"[{Name}] ⚠️ LCD write failed (grid change?): {ex.GetType().Name}");
+				try { _lcdCache.Remove(lcd.CustomName); } catch { }
+			}
 		}
 
 		/// <summary>
@@ -1599,59 +1678,67 @@ namespace CCTVPlugin
 
 				slavesByQuad = new Dictionary<string, List<IMyTextPanel>>(StringComparer.OrdinalIgnoreCase);
 
-				MyAPIGateway.Entities.GetEntities(null, entity =>
-				{
-					var grid = entity as MyCubeGrid;
-					if (grid == null) return false;
-
-					foreach (var block in grid.GetFatBlocks())
+					try
 					{
-						var lcd = block as IMyTextPanel;
-						if (lcd == null) continue;
+					MyAPIGateway.Entities.GetEntities(null, entity =>
+					{
+						var grid = entity as MyCubeGrid;
+						if (grid == null || grid.MarkedForClose) return false;
 
-						string lcdName = lcd.CustomName ?? "";
-
-						// Quick filter: must contain "slave" somewhere
-						if (lcdName.IndexOf("slave", StringComparison.OrdinalIgnoreCase) < 0)
-							continue;
-
-						foreach (var kvp in masterPrefixes)
+						try
 						{
-							// Name must start with the master LCD name (e.g. "LCD_TV Test01_TL")
-							// then have at least one more character (the _Slave suffix)
-							if (lcdName.Length > kvp.Key.Length &&
-								lcdName.StartsWith(kvp.Key, StringComparison.OrdinalIgnoreCase))
+						foreach (var block in grid.GetFatBlocks())
+						{
+							var lcd = block as IMyTextPanel;
+							if (lcd == null) continue;
+
+							string lcdName = lcd.CustomName ?? "";
+
+							// Quick filter: must contain "slave" somewhere
+							if (lcdName.IndexOf("slave", StringComparison.OrdinalIgnoreCase) < 0)
+								continue;
+
+							foreach (var kvp in masterPrefixes)
 							{
-								string quad = kvp.Value;
-								if (!slavesByQuad.ContainsKey(quad))
-									slavesByQuad[quad] = new List<IMyTextPanel>();
-								slavesByQuad[quad].Add(lcd);
-								break;
+								// Name must start with the master LCD name (e.g. "LCD_TV Test01_TL")
+								// then have at least one more character (the _Slave suffix)
+								if (lcdName.Length > kvp.Key.Length &&
+									lcdName.StartsWith(kvp.Key, StringComparison.OrdinalIgnoreCase))
+								{
+									string quad = kvp.Value;
+									if (!slavesByQuad.ContainsKey(quad))
+										slavesByQuad[quad] = new List<IMyTextPanel>();
+									slavesByQuad[quad].Add(lcd);
+									break;
+								}
+							}
+
+							// Single LCD slave: starts with "{lcdPrefix} {baseName}" directly
+							// (no quadrant suffix) e.g. "LCD_TV Test01_Slave", "LCD_TV Test01_Slave2"
+							string singleMaster = $"{lcdPrefix} {baseName}";
+							if (lcdName.Length > singleMaster.Length &&
+								lcdName.StartsWith(singleMaster, StringComparison.OrdinalIgnoreCase))
+							{
+								string remainder = lcdName.Substring(singleMaster.Length);
+								bool isQuadrantSlave =
+									remainder.StartsWith("_TL", StringComparison.OrdinalIgnoreCase) ||
+									remainder.StartsWith("_TR", StringComparison.OrdinalIgnoreCase) ||
+									remainder.StartsWith("_BL", StringComparison.OrdinalIgnoreCase) ||
+									remainder.StartsWith("_BR", StringComparison.OrdinalIgnoreCase);
+								if (!isQuadrantSlave)
+								{
+									if (!slavesByQuad.ContainsKey("_SINGLE"))
+										slavesByQuad["_SINGLE"] = new List<IMyTextPanel>();
+									slavesByQuad["_SINGLE"].Add(lcd);
+								}
 							}
 						}
-
-						// Single LCD slave: starts with "{lcdPrefix} {baseName}" directly
-						// (no quadrant suffix) e.g. "LCD_TV Test01_Slave", "LCD_TV Test01_Slave2"
-						string singleMaster = $"{lcdPrefix} {baseName}";
-						if (lcdName.Length > singleMaster.Length &&
-							lcdName.StartsWith(singleMaster, StringComparison.OrdinalIgnoreCase))
-						{
-							string remainder = lcdName.Substring(singleMaster.Length);
-							bool isQuadrantSlave =
-								remainder.StartsWith("_TL", StringComparison.OrdinalIgnoreCase) ||
-								remainder.StartsWith("_TR", StringComparison.OrdinalIgnoreCase) ||
-								remainder.StartsWith("_BL", StringComparison.OrdinalIgnoreCase) ||
-								remainder.StartsWith("_BR", StringComparison.OrdinalIgnoreCase);
-							if (!isQuadrantSlave)
-							{
-								if (!slavesByQuad.ContainsKey("_SINGLE"))
-									slavesByQuad["_SINGLE"] = new List<IMyTextPanel>();
-								slavesByQuad["_SINGLE"].Add(lcd);
-							}
 						}
+						catch (InvalidOperationException) { } // grid blocks changed mid-iteration
+						return false;
+					});
 					}
-					return false;
-				});
+					catch (InvalidOperationException) { } // entity list changed mid-scan
 
 				_cachedSlavesByQuad = slavesByQuad;
 				_cachedSlavesKey = cacheKey;
@@ -1677,16 +1764,23 @@ namespace CCTVPlugin
 				string masterText = masterLcd.GetText();
 				foreach (var slaveLcd in slaves)
 				{
-					slaveLcd.WriteText(masterText);
-					slaveLcd.ContentType = masterLcd.ContentType;
-					slaveLcd.Font = masterLcd.Font;
-					slaveLcd.FontSize = masterLcd.FontSize;
-					slaveLcd.FontColor = masterLcd.FontColor;
-					slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
-					slaveLcd.TextPadding = masterLcd.TextPadding;
-					slaveLcd.Alignment = masterLcd.Alignment;
+					try
+					{
+						slaveLcd.WriteText(masterText);
+						slaveLcd.ContentType = masterLcd.ContentType;
+						slaveLcd.Font = masterLcd.Font;
+						slaveLcd.FontSize = masterLcd.FontSize;
+						slaveLcd.FontColor = masterLcd.FontColor;
+						slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
+						slaveLcd.TextPadding = masterLcd.TextPadding;
+						slaveLcd.Alignment = masterLcd.Alignment;
 
-					Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
+						Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
+					}
+					catch (Exception ex)
+					{
+						Log.Debug($"[{Name}] ⚠️ Slave copy failed (grid change?): {ex.GetType().Name}");
+					}
 				}
 			}
 
@@ -1698,19 +1792,26 @@ namespace CCTVPlugin
 				if (masterLcd != null)
 				{
 					string masterText = masterLcd.GetText();
-					foreach (var slaveLcd in singleSlaves)
-					{
-						slaveLcd.WriteText(masterText);
-						slaveLcd.ContentType = masterLcd.ContentType;
-						slaveLcd.Font = masterLcd.Font;
-						slaveLcd.FontSize = masterLcd.FontSize;
-						slaveLcd.FontColor = masterLcd.FontColor;
-						slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
-						slaveLcd.TextPadding = masterLcd.TextPadding;
-						slaveLcd.Alignment = masterLcd.Alignment;
+						foreach (var slaveLcd in singleSlaves)
+						{
+							try
+							{
+								slaveLcd.WriteText(masterText);
+								slaveLcd.ContentType = masterLcd.ContentType;
+								slaveLcd.Font = masterLcd.Font;
+								slaveLcd.FontSize = masterLcd.FontSize;
+								slaveLcd.FontColor = masterLcd.FontColor;
+								slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
+								slaveLcd.TextPadding = masterLcd.TextPadding;
+								slaveLcd.Alignment = masterLcd.Alignment;
 
-						Log.Debug($"[{Name}] ✅ Copied to single slave: '{slaveLcd.CustomName}'");
-					}
+								Log.Debug($"[{Name}] ✅ Copied to single slave: '{slaveLcd.CustomName}'");
+							}
+							catch (Exception ex)
+							{
+								Log.Debug($"[{Name}] ⚠️ Single slave copy failed (grid change?): {ex.GetType().Name}");
+							}
+						}
 				}
 			}
 		}
@@ -1749,6 +1850,66 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
+		/// Forces SE to rebuild the render state of every cached LCD by briefly
+		/// toggling ContentType to NONE. The next normal WriteLCDContent call
+		/// restores TEXT_AND_IMAGE and re-writes all properties.
+		/// Called every LCD_FLUSH_INTERVAL ticks (~10 minutes).
+		/// </summary>
+		private void FlushLCDs()
+		{
+			int flushed = 0;
+
+			// Nuclear option: toggle the block OFF then ON to force SE to completely
+			// destroy and recreate the visual render state.  ContentType toggle alone
+			// wasn't enough — SE's renderer apparently caches the visual independently.
+			foreach (var kvp in _lcdCache)
+			{
+				try
+				{
+					var lcd = kvp.Value;
+					if (lcd?.CubeGrid == null) continue;
+					var func = lcd as Sandbox.ModAPI.Ingame.IMyFunctionalBlock;
+					if (func != null && func.Enabled)
+					{
+						func.Enabled = false;
+						func.Enabled = true;
+						flushed++;
+					}
+				}
+				catch { }
+			}
+
+			// Also flush any slave panels
+			if (_cachedSlavesByQuad != null)
+			{
+				foreach (var slaves in _cachedSlavesByQuad.Values)
+				{
+					foreach (var lcd in slaves)
+					{
+						try
+						{
+							if (lcd?.CubeGrid == null) continue;
+							var func = lcd as Sandbox.ModAPI.Ingame.IMyFunctionalBlock;
+							if (func != null && func.Enabled)
+							{
+								func.Enabled = false;
+								func.Enabled = true;
+								flushed++;
+							}
+						}
+						catch { }
+					}
+				}
+			}
+
+			// Invalidate cache so next frame does a fresh entity scan
+			InvalidateLcdCache();
+
+			if (flushed > 0)
+				Log.Info($"[{Name}] 🔃 LCD flush: power-cycled {flushed} panels + cache cleared");
+		}
+
+		/// <summary>
 		/// Logs at INFO when EnableVerboseFrameLogging is on, DEBUG otherwise.
 		/// Use for repetitive operational messages (cycling, GOTO, heartbeat) that
 		/// are useful for diagnostics but noisy in normal production runs.
@@ -1782,18 +1943,26 @@ namespace CCTVPlugin
 			string lcdPrefix = $"{_config.LcdPrefix} {baseName}";
 
 			var lcdPositions = new List<Vector3D>();
-			MyAPIGateway.Entities.GetEntities(null, entity =>
+			try
 			{
-				var grid = entity as MyCubeGrid;
-				if (grid == null) return false;
-				foreach (var block in grid.GetFatBlocks())
+				MyAPIGateway.Entities.GetEntities(null, entity =>
 				{
-					var lcd = block as IMyTextPanel;
-					if (lcd != null && (lcd.CustomName ?? "").StartsWith(lcdPrefix, StringComparison.OrdinalIgnoreCase))
-						lcdPositions.Add(lcd.WorldMatrix.Translation);
-				}
-				return false;
-			});
+					var grid = entity as MyCubeGrid;
+					if (grid == null || grid.MarkedForClose) return false;
+					try
+					{
+						foreach (var block in grid.GetFatBlocks())
+						{
+							var lcd = block as IMyTextPanel;
+							if (lcd != null && (lcd.CustomName ?? "").StartsWith(lcdPrefix, StringComparison.OrdinalIgnoreCase))
+								lcdPositions.Add(lcd.WorldMatrix.Translation);
+						}
+					}
+					catch (InvalidOperationException) { } // grid blocks changed mid-iteration
+					return false;
+				});
+			}
+			catch (InvalidOperationException) { } // entity list changed mid-scan
 
 			if (lcdPositions.Count == 0)
 			{
@@ -1871,7 +2040,6 @@ namespace CCTVPlugin
 			_isManualMode = true;
 
 			Send($"CAMERA {_currentCameraIndex + 1}");
-			Send("SPECTATOR");
 			TeleportToCamera(cam);
 
 			_lastCameraSwitchTime = DateTime.UtcNow;

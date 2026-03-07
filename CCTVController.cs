@@ -286,7 +286,10 @@ namespace CCTVPlugin
 
                 // Drain actions queued by the message handler (game-thread safe)
                 while (_pendingCameraActions.TryDequeue(out var act))
-                    act();
+                {
+                    try { act(); }
+                    catch (Exception ex) { Log.Error(ex, "Error executing queued camera action"); }
+                }
 
                 // Poll Programmable Blocks for CCTV commands (mod-free button control)
                 if (++_pbScanTicks >= PB_SCAN_INTERVAL)
@@ -2140,19 +2143,38 @@ namespace CCTVPlugin
             int totalBlocks = 0;
 
             // Get all cube grids using Torch's internal API
-            // Manual cast avoids OfType<> LINQ which allocates an iterator per call
-            var entities = MyEntities.GetEntities();
-            foreach (var entity in entities)
+            // Snapshot to a list first: merge blocks / PB-driven grid splits can modify
+            // the live entity collection mid-iteration → InvalidOperationException.
+            List<MyCubeGrid> grids;
+            try
             {
-                var grid = entity as MyCubeGrid;
-                if (grid == null)
-                    continue;
+                var entities = MyEntities.GetEntities();
+                grids = new List<MyCubeGrid>();
+                foreach (var entity in entities)
+                {
+                    var grid = entity as MyCubeGrid;
+                    if (grid != null)
+                        grids.Add(grid);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                Log.Info("RescanCameras: entity list changed mid-snapshot (merge block?) — will retry next interval");
+                return;
+            }
+
+            foreach (var grid in grids)
+            {
+                if (grid.MarkedForClose) continue;
 
                 gridsChecked++;
                 long gridEntityId = grid.EntityId;
                 string gridName = grid.DisplayName ?? "UnknownGrid";
 
                 // Iterate through fat blocks (functional blocks)
+                // Wrapped in try/catch: merge blocks can modify the block list mid-iteration.
+                try
+                {
                 var fatBlocks = grid.GetFatBlocks();
                 if (fatBlocks.Count == 0)
                 {
@@ -2238,6 +2260,12 @@ namespace CCTVPlugin
                 {
                     Log.Debug($"Grid '{gridName}' ({gridEntityId}): {blockCount} blocks");
                 }
+                }
+                catch (InvalidOperationException)
+                {
+                    Log.Debug($"RescanCameras: grid '{gridName}' blocks changed mid-iteration (merge block?) — skipping grid");
+                    continue;
+                }
             }
 
             // Sort cameras using round-robin grid interleaving for balanced cycling
@@ -2322,10 +2350,11 @@ namespace CCTVPlugin
                     Log.Info("Camera index sent to mod");
                 }
             }
-            else if (_client != null && _client.Connected)
+            else
             {
-                // Only notify if client is connected and no cameras found
-                Send($"INFO Cameras indexed: {_indexedCameras.Count}");
+                Log.Warn($"RescanCameras: 0 cameras found matching prefix '{_cameraPrefix}' (scanned {gridsChecked} grids, {totalBlocks} blocks)");
+                if (_client != null && _client.Connected)
+                    Send($"INFO Cameras indexed: {_indexedCameras.Count}");
             }
         }
 

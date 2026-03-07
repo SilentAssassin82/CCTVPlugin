@@ -2,7 +2,7 @@
 <PluginManifest>
   <Name>CCTVPlugin</Name>
   <Guid>e6912793-919f-486a-8ffd-b37ce045113b</Guid>
-  <Version>1.3.4</Version>
+  <Version>1.3.5</Version>
   <Description>Real-time ASCII CCTV system — streams true-color video from a second SE client to in-game LCD panels</Description>
   <Author>Chris</Author>
   <Repository>https://github.com/SilentAssassin82/CCTVPlugin</Repository>

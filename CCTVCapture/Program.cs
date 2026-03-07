@@ -48,6 +48,15 @@ namespace CCTVCapture
         // resets this flag (indicating the view needs re-acquiring after a teleport).
         private static bool _spectatorModeActive = false;
 
+        // Connection health: heartbeat and reconnection
+        private static DateTime _lastPingSent = DateTime.MinValue;
+        private static DateTime _lastPongReceived = DateTime.MinValue;
+        private static int _heartbeatIntervalMs = 15000;  // Send PING every 15 seconds
+        private static int _heartbeatTimeoutMs = 45000;   // Declare dead if no PONG for 45 seconds
+        private static bool _connectionDead = false;       // Set by write failures to break the loop
+        private static int _maxReconnectAttempts = 10;
+        private static int _reconnectDelayMs = 5000;       // 5 seconds between reconnect attempts
+
         static void Main(string[] args)
         {
             // Parse command-line arguments
@@ -74,12 +83,40 @@ namespace CCTVCapture
             Console.WriteLine("=== CCTVCapture CCTV Screen Capture ===");
             if (_verboseLogging)
                 Console.WriteLine("[VERBOSE MODE ENABLED]");
+
+            for (int attempt = 0; attempt <= _maxReconnectAttempts; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    Console.WriteLine($"\n[RECONNECT] Attempt {attempt}/{_maxReconnectAttempts} in {_reconnectDelayMs / 1000}s...");
+                    Thread.Sleep(_reconnectDelayMs);
+                }
+
             Console.WriteLine($"Connecting to {_serverHost}:{_serverPort}...");
 
             try
             {
                 // Connect to Torch plugin
                 _client = new TcpClient(_serverHost, _serverPort);
+
+                // Enable TCP KeepAlive so the OS detects dead connections.
+                // Without this, a silently-dropped connection can go unnoticed
+                // for up to 2 hours (Windows default).
+                _client.Client.SetSocketOption(
+                    System.Net.Sockets.SocketOptionLevel.Socket,
+                    System.Net.Sockets.SocketOptionName.KeepAlive, true);
+                // KeepAlive probes: start after 30s idle, retry every 5s, 3 retries
+                // (IOControlCode byte layout: [onoff 4B][time_ms 4B][interval_ms 4B])
+                byte[] keepAliveValues = new byte[12];
+                BitConverter.GetBytes(1).CopyTo(keepAliveValues, 0);       // on
+                BitConverter.GetBytes(30000).CopyTo(keepAliveValues, 4);   // 30s idle
+                BitConverter.GetBytes(5000).CopyTo(keepAliveValues, 8);    // 5s interval
+                _client.Client.IOControl(IOControlCode.KeepAliveValues, keepAliveValues, null);
+
+                _client.SendTimeout = 5000;    // 5s write timeout
+                _client.ReceiveTimeout = 0;    // reads are non-blocking (DataAvailable check)
+                _client.NoDelay = true;
+
                 _stream = _client.GetStream();
                 _reader = new StreamReader(_stream, Encoding.UTF8);
                 _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
@@ -115,8 +152,11 @@ namespace CCTVCapture
                 _writer.WriteLine("PING");
                 string response = _reader.ReadLine();  // reads PONG
                 Console.WriteLine($"<< {response}");
-                string ready = _reader.ReadLine();      // reads READY (server sends PONG then READY)
-                Console.WriteLine($"<< {ready}");
+
+                // Initialise heartbeat tracking after successful handshake
+                _lastPingSent = DateTime.Now;
+                _lastPongReceived = DateTime.Now;
+                _connectionDead = false;
 
                 // Request config from server (will arrive asynchronously in main loop)
                 _writer.WriteLine("GETCONFIG");
@@ -234,7 +274,7 @@ namespace CCTVCapture
                 int frameCount = 0;
                 DateTime lastCapture = DateTime.Now;
 
-                while (_client.Connected)
+                while (_client.Connected && !_connectionDead)
                 {
                     try
                     {
@@ -263,7 +303,14 @@ namespace CCTVCapture
                                     continue;
                                 }
 
-                                // Handle camera index
+                                // Handle PONG heartbeat response
+                                if (line.Trim() == "PONG")
+                                {
+                                    _lastPongReceived = DateTime.Now;
+                                    if (_verboseLogging)
+                                        Console.WriteLine("[HEARTBEAT] PONG received");
+                                    continue;
+                                }
                                 if (line.StartsWith("INDEX ") && !line.Contains("COMPLETE"))
                                 {
                                     string[] parts = line.Split(' ');
@@ -282,11 +329,13 @@ namespace CCTVCapture
                                 {
                                     Console.WriteLine($"[INFO] Camera index loaded: {_cameraIndex.Count} cameras");
                                 }
-                                // A CAMERA switch means the view is changing — spectator mode
-                                // must be re-confirmed after the teleport settles.
+                                // CAMERA switch notification — the server is changing views.
+                                // Spectator mode stays active (GOTO repositions the camera
+                                // without needing to exit/re-enter spectator mode via F8).
                                 else if (line.StartsWith("CAMERA "))
                                 {
-                                    _spectatorModeActive = false;
+                                    // _spectatorModeActive intentionally NOT reset here.
+                                    // F8 is a toggle — resending it would EXIT spectator mode.
                                 }
                                 // Handle SPECTATOR command - re-enter spectator mode
                                 else if (line == "SPECTATOR")
@@ -322,6 +371,32 @@ namespace CCTVCapture
                             }
                         }
 
+                        // --- Heartbeat: send periodic PING and detect dead connections ---
+                        if ((DateTime.Now - _lastPingSent).TotalMilliseconds >= _heartbeatIntervalMs)
+                        {
+                            try
+                            {
+                                _writer.WriteLine("PING");
+                                _lastPingSent = DateTime.Now;
+                                if (_verboseLogging)
+                                    Console.WriteLine("[HEARTBEAT] PING sent");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[HEARTBEAT] PING write failed — connection dead: {ex.Message}");
+                                _connectionDead = true;
+                                break;
+                            }
+                        }
+
+                        // Check heartbeat timeout: no PONG received within the timeout window
+                        if ((DateTime.Now - _lastPongReceived).TotalMilliseconds >= _heartbeatTimeoutMs)
+                        {
+                            Console.WriteLine($"[HEARTBEAT] No PONG received for {_heartbeatTimeoutMs / 1000}s — connection dead");
+                            _connectionDead = true;
+                            break;
+                        }
+
                         // Capture and send frame
                         if ((DateTime.Now - lastCapture).TotalMilliseconds >= _captureIntervalMs)
                         {
@@ -335,19 +410,63 @@ namespace CCTVCapture
 
                         Thread.Sleep(10); // Small sleep to prevent CPU spinning
                     }
+                    catch (IOException)
+                    {
+                        Console.WriteLine("[ERROR] Loop: connection lost (IO error)");
+                        _connectionDead = true;
+                        break;
+                    }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[ERROR] Loop error: {ex.Message}");
+                        if (ex.InnerException is SocketException || ex.InnerException is IOException)
+                        {
+                            _connectionDead = true;
+                            break;
+                        }
                         Thread.Sleep(1000);
                     }
                 }
+
+                // Connection ended — clean up before potential reconnect
+                Console.WriteLine("[INFO] Connection ended, cleaning up...");
+                try { _writer?.Close(); } catch { }
+                try { _reader?.Close(); } catch { }
+                try { _stream?.Close(); } catch { }
+                try { _client?.Close(); } catch { }
+                _writer = null;
+                _reader = null;
+                _stream = null;
+                _client = null;
+
+                // If the connection died, loop back and reconnect
+                if (_connectionDead)
+                {
+                    Console.WriteLine("[INFO] Will attempt to reconnect...");
+                    _spectatorModeActive = false;
+                    continue;
+                }
+
+                // Clean disconnect (server shut down gracefully) — stop
+                break;
+            }
+            catch (SocketException ex)
+            {
+                Console.WriteLine($"[ERROR] Connection failed: {ex.Message}");
+                try { _client?.Close(); } catch { }
+                _client = null;
+                continue; // Try reconnecting
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[FATAL] {ex.Message}");
-                Console.WriteLine("\nPress any key to exit...");
-                Console.ReadKey();
+                break;
             }
+            } // end reconnect loop
+
+            Console.WriteLine("\n[INFO] CCTVCapture exiting.");
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
         }
 
         static void ParseServerConfig(string configLine)
@@ -696,6 +815,16 @@ namespace CCTVCapture
                 }
 
                 capture.Dispose();
+            }
+            catch (IOException)
+            {
+                Console.WriteLine("[ERROR] Frame write failed (connection lost)");
+                _connectionDead = true;
+            }
+            catch (SocketException)
+            {
+                Console.WriteLine("[ERROR] Frame write failed (socket error)");
+                _connectionDead = true;
             }
             catch (Exception ex)
             {
