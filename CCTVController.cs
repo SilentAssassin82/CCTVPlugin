@@ -236,7 +236,7 @@ namespace CCTVPlugin
 
             try
             {
-                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution}";
+                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution} DesaturateColorMode={_config.DesaturateColorMode}";
                 Send(message);
                 Log.Info($"Sent CONFIG to fake client: {_config.CaptureWidth}x{_config.CaptureHeight} @{_captureFps}fps color={_useColorMode} dither={_config.DitherMode} postproc={_config.PostProcessMode} gridPostProc={_config.GridPostProcessMode}");
             }
@@ -1990,7 +1990,11 @@ namespace CCTVPlugin
         }
 
         /// <summary>
-        /// Splits an ASCII frame into 4 quadrants for 2×2 LCD grid display
+        /// Splits an ASCII frame into 4 quadrants for 2×2 LCD grid display.
+        /// Grid resolution is auto-calculated from GridFontSize so content fills each
+        /// panel edge-to-edge — simple midpoint split, no padding needed.
+        /// Offsets (GridVerticalOffset / GridHorizontalOffset) provide optional
+        /// fine-tuning for the physical gap between LCD blocks.
         /// </summary>
         private (string topLeft, string topRight, string bottomLeft, string bottomRight) SplitFrameIntoQuadrants(string asciiFrame, int width, int height, bool isColor = true)
         {
@@ -1998,19 +2002,24 @@ namespace CCTVPlugin
 
             int midWidth = width / 2;
 
-            // SE Monospace grayscale chars have a ~2:1 height-to-width aspect ratio.
-            // At the same font size colour chars fill the full panel width, but grayscale
-            // chars are half as wide — so 181 grayscale chars only cover the left ~50%.
-            // The fix mirrors CCTVClientConnection.WriteGridLCDs: for grayscale use only
-            // the top-quarter of rows per quadrant (height/4) and display at 2× font size,
-            // which produces the same visual fill as colour at the normal font size.
-            int midHeight = isColor ? height / 2 : height / 4;
+            // Use the actual line count to derive the per-quadrant row count.
+            // This auto-adapts to whatever the ASCII converter produced:
+            //   Colour frames: lines.Length == height      → midHeight == height/2
+            //   Grayscale grid: lines.Length == height/2.4  → midHeight ≈ height/4.8
+            int midHeight = lines.Length / 2;
 
-            // GridVerticalOffset adds extra rows to the top quadrants (TL/TR),
-            // pushing their content further down the LCD panel and closing the
-            // vertical seam between top and bottom physical panels.
-            int vOffset = Math.Min(_config.GridVerticalOffset, midHeight);
-            int topMidHeight = midHeight + vOffset;
+            // GridVerticalOffset: positive creates overlap at the seam to close the
+            // physical gap between LCD blocks.  Top panels skip vOffset rows at the
+            // top, bottom panels start vOffset rows earlier.
+            int vOffset = _config.GridVerticalOffset;
+            int tlStartY = Math.Max(0, Math.Min(vOffset, midHeight - 1));
+            int blStartY = Math.Max(0, midHeight - vOffset);
+            int blEndY = blStartY + midHeight;
+
+            // GridHorizontalOffset: same principle for the vertical seam.
+            int hOffset = _config.GridHorizontalOffset;
+            int tlStartX = Math.Max(0, Math.Min(hOffset, midWidth - 1));
+            int trStartX = Math.Max(0, midWidth - hOffset);
 
             var tlBuilder = new StringBuilder();
             var trBuilder = new StringBuilder();
@@ -2020,49 +2029,45 @@ namespace CCTVPlugin
             for (int y = 0; y < lines.Length; y++)
             {
                 string line = lines[y];
-
-                // Ensure line has enough characters
                 if (line.Length < width)
-                {
-                    // Pad with spaces if needed
                     line = line.PadRight(width, ' ');
-                }
 
-                // Top half (+ extra rows from vertical offset)
-                if (y < topMidHeight)
+                // Top half
+                if (y >= tlStartY && y < tlStartY + midHeight)
                 {
-                    // Top-left quadrant
-                    if (line.Length >= midWidth)
+                    // Top-left
                     {
-                        tlBuilder.Append(line.Substring(0, midWidth));
-                        if (y < topMidHeight - 1) tlBuilder.Append('\n');
+                        int endX = Math.Min(tlStartX + midWidth, line.Length);
+                        if (endX > tlStartX)
+                            tlBuilder.Append(line.Substring(tlStartX, endX - tlStartX));
+                        if (y < tlStartY + midHeight - 1) tlBuilder.Append('\n');
                     }
-
-                    // Top-right quadrant
-                    if (line.Length >= width)
+                    // Top-right
                     {
-                        trBuilder.Append(line.Substring(midWidth, width - midWidth));
-                        if (y < topMidHeight - 1) trBuilder.Append('\n');
+                        int endX = Math.Min(trStartX + midWidth, line.Length);
+                        if (endX > trStartX)
+                            trBuilder.Append(line.Substring(trStartX, endX - trStartX));
+                        if (y < tlStartY + midHeight - 1) trBuilder.Append('\n');
                     }
                 }
-                // Bottom half (starts at original midHeight)
-                else if (y >= midHeight && y < midHeight * 2)
+                // Bottom half
+                if (y >= blStartY && y < blEndY)
                 {
-                    // Bottom-left quadrant
-                    if (line.Length >= midWidth)
+                    // Bottom-left
                     {
-                        blBuilder.Append(line.Substring(0, midWidth));
-                        if (y < midHeight * 2 - 1) blBuilder.Append('\n');
+                        int endX = Math.Min(tlStartX + midWidth, line.Length);
+                        if (endX > tlStartX)
+                            blBuilder.Append(line.Substring(tlStartX, endX - tlStartX));
+                        if (y < blEndY - 1) blBuilder.Append('\n');
                     }
-
-                    // Bottom-right quadrant
-                    if (line.Length >= width)
+                    // Bottom-right
                     {
-                        brBuilder.Append(line.Substring(midWidth, width - midWidth));
-                        if (y < midHeight * 2 - 1) brBuilder.Append('\n');
+                        int endX = Math.Min(trStartX + midWidth, line.Length);
+                        if (endX > trStartX)
+                            brBuilder.Append(line.Substring(trStartX, endX - trStartX));
+                        if (y < blEndY - 1) brBuilder.Append('\n');
                     }
                 }
-                // Rows beyond 2×midHeight are discarded (only relevant for grayscale)
             }
 
             return (tlBuilder.ToString(), trBuilder.ToString(), blBuilder.ToString(), brBuilder.ToString());

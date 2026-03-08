@@ -95,6 +95,7 @@ The mod registers three terminal actions that appear in every Button Panel's G-m
 
 > **The mod must be enabled in world settings** for the actions to appear in the G-menu picker. The client-side mod handles G-menu display; the server-side mod handles button execution — both sides register automatically.
 
+⚠️ Important: Put the LCD name (e.g. Test01) in the Button Panel's CustomData only — never in the cockpit's CustomData. Setting it on the cockpit can cause client desync (no tools, frozen streams, unable to exit seats).
 ---
 
 ## Camera Loops
@@ -171,6 +172,7 @@ LCD_TVCamera Hangar  →  LCD_TV Hangar
 <LcdGridResolution>362</LcdGridResolution>
 <CaptureFps>2</CaptureFps>
 <UseColorMode>true</UseColorMode>
+<DesaturateColorMode>false</DesaturateColorMode>
 <GridFontSize>0.1</GridFontSize>
 <GridVerticalOffset>0</GridVerticalOffset>
 <SingleLcdFontSize>0.080</SingleLcdFontSize>
@@ -178,11 +180,13 @@ LCD_TVCamera Hangar  →  LCD_TV Hangar
 <UseMultiClientMode>false</UseMultiClientMode>
 ```
 
-`LcdGridResolution` — output resolution for the 2×2 LCD grid (and capture). Must be an even number between 64 and 484. The single-LCD resolution is always half this value. Recommended: 362 for colour, 484 for grayscale. Changing this value automatically syncs `CaptureWidth` and `CaptureHeight`.
+`LcdGridResolution` — output resolution for the 2×2 LCD grid (and capture). Must be an even number between 64 and 700. The single-LCD resolution is always half this value. **Auto-calculated from `GridFontSize`** so the content exactly fills each panel at the chosen font — move the font slider and the resolution follows. Can still be overridden manually.
 
-`GridFontSize` — base font size for 2×2 grid panels (0.05–0.15). Grayscale automatically doubles this value.
+`GridFontSize` — base font size for 2×2 grid panels (0.05–0.15). Changing this value auto-calculates `LcdGridResolution` to fill the panel edge-to-edge (e.g. 0.055 → 658, 0.075 → 482, 0.100 → 362). Grayscale automatically doubles this value.
 
-`GridVerticalOffset` — adds extra rows to the top grid panels (TL/TR) to close the vertical seam between top and bottom LCD panels (0–10 rows, default 0). Start with 1–2 and adjust in-game.
+`DesaturateColorMode` — when `true` (and `UseColorMode` is also `true`), the captured image is desaturated to grayscale before encoding into SE color characters. This produces **square-pixel B&W** output using the color char pipeline — no 1:2 aspect ratio issues, auto-fit resolution works correctly, and dithering still applies. The classic grayscale mode (`UseColorMode=false`) is kept for LCD font tint support.
+
+`GridVerticalOffset` — row offset for the 2×2 grid to close the physical seam between top and bottom LCD panels (−30 to +30, default 5). With auto-fit resolution the offset should be 0 or very small.
 
 `SingleLcdFontSize` — base font size for single LCD panels (0.05–0.15). Independent of grid font size.
 
@@ -227,9 +231,11 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 ## Features
 
 - True color video — SE's hidden 0xE100 palette (512 colors, 9-bit RGB)
+- **Desaturate (B&W) mode** — square-pixel grayscale via the color char pipeline; no aspect ratio issues, dithering still applies
+- **Auto-fit resolution** — `GridFontSize` automatically calculates `LcdGridResolution` so content fills each panel edge-to-edge with no seam
 - GZip frame compression (~14× ratio over uncompressed; negligible bandwidth)
 - Configurable LCD render resolution — single slider controls capture and grid resolution (single LCD = half)
-- 2×2 grid vertical offset — close the seam between top and bottom LCD panels without changing font size
+- 2×2 grid offset sliders — close the physical seam between LCD panels
 - Independent font size tuning — separate Grid Font Size and Single LCD Font Size controls
 - Slave LCD support — single slaves (`LCD_TV Test01_Slave`) and grid quadrant slaves (`LCD_TV Test01_TL_Slave`); any number per master; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
@@ -275,6 +281,12 @@ Confirm the port matches the plugin config and no firewall is blocking it. For m
 ---
 
 ## Changelog
+
+### v1.4.0
+- **Auto-fit grid resolution:** `GridFontSize` now automatically calculates `LcdGridResolution` so the rendered content exactly fills each LCD panel at the chosen font size. At font 0.055 the grid is 658×658 (329 chars per panel), at 0.100 it's 362×362 (181 per panel). No manual offset needed — simple 4-way equal split.
+- **Desaturate (B&W) mode:** New `DesaturateColorMode` option strips colour from the captured image before encoding into SE color characters, producing square-pixel grayscale output. Uses the same color char pipeline as full colour — no 1:2 aspect ratio issues, auto-fit resolution works correctly, and dithering still applies. The classic grayscale mode (`UseColorMode=false`) is kept for LCD font tint support.
+- **Resolution cap raised to 700:** Both the plugin and CCTVCapture now accept grid resolutions up to 700 (was 484/512), supporting smaller font sizes that need more characters per panel.
+- **Grid offset rework:** Reverted the padding-based offset approach to the original row-skipping method. With auto-fit resolution the offsets should be 0 or very small (only needed for the physical gap between LCD blocks).
 
 ### v1.3.0
 - **Unified resolution control:** `LcdGridResolution` is now the single source of truth — changing it automatically syncs `CaptureWidth` and `CaptureHeight`. The separate Resolution Width/Height fields have been removed from the UI.

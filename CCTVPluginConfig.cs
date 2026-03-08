@@ -34,10 +34,12 @@ namespace CCTVPlugin
         private string _gridPostProcessMode = "None";
         private bool _enableVerboseFrameLogging = false;
         private float _gridFontSize = 0.1f;
-        private int _gridVerticalOffset = 0;
+        private int _gridVerticalOffset = 5;   // default overlap to close vertical seam
+        private int _gridHorizontalOffset = 0;
         private float _singleLcdFontSize = 0.080f;
         private float _proximityCheckRadius = 150f;
         private int _lcdGridResolution = 362;
+        private bool _desaturateColorMode = false;
 
         // Multi-client support
         private List<CCTVClientInstanceConfig> _fakeClientInstances = new List<CCTVClientInstanceConfig>();
@@ -209,17 +211,30 @@ namespace CCTVPlugin
             set
             {
                 _useColorMode = value;
-                // Grayscale gets higher resolution to match 512-colour char density (~29k chars/panel).
-                // Colour stays at 362 (32k chars/panel at 1 char per pixel).
-                _lcdGridResolution = value ? 362 : 484;
                 // Sync per-mode font defaults so each display type fills its panel correctly.
-                _gridFontSize       = value ? 0.1f   : 0.075f;
                 _singleLcdFontSize  = value ? 0.1f   : 0.080f;
+                // Setting GridFontSize (via property) auto-calculates LcdGridResolution
+                // so each panel is exactly filled at the chosen font.
+                GridFontSize = value ? 0.1f : 0.075f;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(LcdGridResolution));
-                OnPropertyChanged(nameof(LcdSingleResolution));
-                OnPropertyChanged(nameof(GridFontSize));
                 OnPropertyChanged(nameof(SingleLcdFontSize));
+            }
+        }
+
+        /// <summary>
+        /// When enabled with Color Mode, desaturates the captured image before encoding
+        /// into SE color chars. Produces square-pixel grayscale (R=G=B) using the color
+        /// char pipeline — no 1:2 aspect ratio issues, auto-fit resolution works correctly.
+        /// The classic grayscale mode (Color Mode off) is kept for LCD font tint support.
+        /// </summary>
+        [XmlElement("DesaturateColorMode")]
+        public bool DesaturateColorMode
+        {
+            get => _desaturateColorMode;
+            set
+            {
+                _desaturateColorMode = value;
+                OnPropertyChanged();
             }
         }
 
@@ -308,6 +323,10 @@ namespace CCTVPlugin
             }
         }
 
+        // Reference baseline: at font 0.1 (color), 181 SE color chars fill one LCD panel.
+        // Constant = 181 * 0.1 = 18.1.  Chars per panel at any font F = 18.1 / F.
+        private const float FONT_RESOLUTION_CONSTANT = 18.1f;
+
         [XmlElement("GridFontSize")]
         public float GridFontSize
         {
@@ -316,14 +335,22 @@ namespace CCTVPlugin
             {
                 _gridFontSize = Math.Max(0.05f, Math.Min(0.2f, value));
                 OnPropertyChanged();
+
+                // Auto-calculate grid resolution so the content exactly fills each panel
+                // at this font size.  No offsets needed — simple 4-way equal split.
+                int charsPerPanel = (int)Math.Round(FONT_RESOLUTION_CONSTANT / _gridFontSize);
+                int autoGrid = charsPerPanel * 2;
+                // Ensure even
+                if (autoGrid % 2 != 0) autoGrid--;
+                LcdGridResolution = autoGrid;
             }
         }
 
         /// <summary>
         /// Vertical row offset for the 2×2 grid bottom panels (BL/BR).
-        /// Positive values pull the bottom quadrants upward by N rows, closing the
-        /// vertical seam between the top and bottom LCD panels.
-        /// Range: 0–10 rows. Default: 0 (no offset).
+        /// Positive values shift the bottom panels' start UP (overlap with top panels),
+        /// negative values shift them DOWN. Closes or widens the vertical seam.
+        /// Range: −15 to +15 rows. Default: 0 (no offset).
         /// </summary>
         [XmlElement("GridVerticalOffset")]
         public int GridVerticalOffset
@@ -331,7 +358,24 @@ namespace CCTVPlugin
             get => _gridVerticalOffset;
             set
             {
-                _gridVerticalOffset = Math.Max(0, Math.Min(10, value));
+                _gridVerticalOffset = Math.Max(-30, Math.Min(30, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Horizontal column offset for the 2×2 grid right panels (TR/BR).
+        /// Positive values shift the right panels' start LEFT (overlap with left panels),
+        /// negative values shift them RIGHT. Closes or widens the horizontal seam.
+        /// Range: −15 to +15 columns. Default: 0 (no offset).
+        /// </summary>
+        [XmlElement("GridHorizontalOffset")]
+        public int GridHorizontalOffset
+        {
+            get => _gridHorizontalOffset;
+            set
+            {
+                _gridHorizontalOffset = Math.Max(-30, Math.Min(30, value));
                 OnPropertyChanged();
             }
         }
@@ -355,8 +399,8 @@ namespace CCTVPlugin
 
         /// <summary>
         /// Output render resolution for the 2×2 LCD grid (width and height in characters).
-        /// Must be an even number between 64 and 484. The single-LCD resolution is always half of this value.
-        /// Auto-set by UseColorMode: 362 for colour, 484 for grayscale.
+        /// Must be an even number between 64 and 700. The single-LCD resolution is always half of this value.
+        /// Auto-calculated from GridFontSize so the content exactly fills each panel.
         /// </summary>
         [XmlElement("LcdGridResolution")]
         public int LcdGridResolution
@@ -364,8 +408,8 @@ namespace CCTVPlugin
             get => _lcdGridResolution;
             set
             {
-                // Clamp to even number in [64, 484]
-                int clamped = Math.Max(64, Math.Min(484, value));
+                // Clamp to even number in [64, 700]
+                int clamped = Math.Max(64, Math.Min(700, value));
                 _lcdGridResolution = (clamped % 2 != 0) ? clamped - 1 : clamped;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(LcdSingleResolution));

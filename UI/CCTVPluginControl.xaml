@@ -29,10 +29,10 @@
             <TextBlock Text="Capture" FontWeight="Bold" Margin="0,10,0,5"/>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="LCD Render Resolution:" Width="160" VerticalAlignment="Center"/>
-                <Slider Width="150" Minimum="64" Maximum="484" Value="{Binding LcdGridResolution}"
+                <Slider Width="150" Minimum="64" Maximum="700" Value="{Binding LcdGridResolution}"
                         TickFrequency="2" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding LcdGridResolution, StringFormat={}{0}px}" Width="45" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                <TextBlock Text="  (auto: 362 colour / 484 grayscale, single = half)" Foreground="Gray" VerticalAlignment="Center"/>
+                <TextBlock Text="  (auto-calculated from Grid Font Size)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Capture FPS:" Width="160" VerticalAlignment="Center"/>
@@ -48,6 +48,11 @@
                 <TextBlock Text="Color Mode:" Width="160" VerticalAlignment="Center"/>
                 <CheckBox IsChecked="{Binding UseColorMode}" VerticalAlignment="Center"/>
                 <TextBlock Text="  (512-color SE palette)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Desaturate (B&amp;W):" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding DesaturateColorMode}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (grayscale via square color chars — requires Color Mode)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Dithering:" Width="160" VerticalAlignment="Center"/>
@@ -103,14 +108,21 @@
                 <Slider Width="150" Minimum="0.05" Maximum="0.15" Value="{Binding GridFontSize}" 
                         TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding GridFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                <TextBlock Text="  (2×2 grid alignment)" Foreground="Gray" VerticalAlignment="Center"/>
+                <TextBlock Text="  (auto-fits resolution to fill panel)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Grid Vertical Offset:" Width="160" VerticalAlignment="Center"/>
-                <Slider Width="150" Minimum="0" Maximum="10" Value="{Binding GridVerticalOffset}" 
+                <Slider Width="150" Minimum="-30" Maximum="30" Value="{Binding GridVerticalOffset}" 
                         TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding GridVerticalOffset, StringFormat={}{0} rows}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                <TextBlock Text="  (pull bottom panels up to close seam)" Foreground="Gray" VerticalAlignment="Center"/>
+                <TextBlock Text="  (+ closes seam, − widens)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Grid Horizontal Offset:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="-30" Maximum="30" Value="{Binding GridHorizontalOffset}" 
+                        TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding GridHorizontalOffset, StringFormat={}{0} cols}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (+ closes seam, − widens)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Single LCD Font Size:" Width="160" VerticalAlignment="Center"/>

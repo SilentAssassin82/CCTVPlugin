@@ -30,6 +30,7 @@ namespace CCTVCapture
         private static CCTVCommon.DitherMode _ditherMode = CCTVCommon.DitherMode.None;
         private static CCTVCommon.PostProcessMode _postProcessMode = CCTVCommon.PostProcessMode.None;
         private static CCTVCommon.PostProcessMode _gridPostProcessMode = CCTVCommon.PostProcessMode.LightBlur;
+        private static bool _desaturateColorMode = false;
 
         // Track current camera's LCD setup (for dual-resolution rendering)
         private static bool _currentCameraHasSingleLcd = false;
@@ -47,6 +48,13 @@ namespace CCTVCapture
         // Once we've entered spectator mode, suppress further F8s until a CAMERA switch
         // resets this flag (indicating the view needs re-acquiring after a teleport).
         private static bool _spectatorModeActive = false;
+
+        // Capture backoff: when the graphics subsystem is unavailable (SE reconnecting,
+        // driver busy), we back off exponentially instead of hammering CopyFromScreen
+        // which can crash the graphics driver.
+        private static int _consecutiveCaptureFailures = 0;
+        private static int _captureBackoffMs = 0;
+        private static DateTime _lastCaptureBackoffLog = DateTime.MinValue;
 
         // Connection health: heartbeat and reconnection
         private static DateTime _lastPingSent = DateTime.MinValue;
@@ -397,8 +405,9 @@ namespace CCTVCapture
                             break;
                         }
 
-                        // Capture and send frame
-                        if ((DateTime.Now - lastCapture).TotalMilliseconds >= _captureIntervalMs)
+                        // Capture and send frame (with backoff if graphics subsystem is down)
+                        int effectiveInterval = _captureIntervalMs + _captureBackoffMs;
+                        if ((DateTime.Now - lastCapture).TotalMilliseconds >= effectiveInterval)
                         {
                             CaptureAndSendFrame();
                             frameCount++;
@@ -486,12 +495,12 @@ namespace CCTVCapture
                     switch (key)
                     {
                         case "CaptureWidth":
-                            if (int.TryParse(val, out int w))
-                                _captureWidth = Math.Max(64, Math.Min(512, w));
-                            break;
-                        case "CaptureHeight":
-                            if (int.TryParse(val, out int h))
-                                _captureHeight = Math.Max(64, Math.Min(512, h));
+                                if (int.TryParse(val, out int w))
+                                    _captureWidth = Math.Max(64, Math.Min(700, w));
+                                break;
+                            case "CaptureHeight":
+                                if (int.TryParse(val, out int h))
+                                    _captureHeight = Math.Max(64, Math.Min(700, h));
                             break;
                         case "CaptureFps":
                             if (int.TryParse(val, out int fps) && fps > 0)
@@ -531,10 +540,14 @@ namespace CCTVCapture
                         case "LcdGridResolution":
                             if (int.TryParse(val, out int gridRes))
                             {
-                                int clamped = Math.Max(64, Math.Min(484, gridRes));
+                                int clamped = Math.Max(64, Math.Min(700, gridRes));
                                 _lcdGridRes = (clamped % 2 != 0) ? clamped - 1 : clamped;
                                 _lcdSingleRes = _lcdGridRes / 2;
                             }
+                            break;
+                        case "DesaturateColorMode":
+                            if (bool.TryParse(val, out bool desat))
+                                _desaturateColorMode = desat;
                             break;
                     }
                 }
@@ -562,8 +575,26 @@ namespace CCTVCapture
 
                 if (capture == null)
                 {
-                    Console.WriteLine("[ERROR] Screen capture returned null!");
+                    // Graphics subsystem unavailable — SE may be reconnecting or driver busy.
+                    // Back off exponentially: 500ms → 1s → 2s → 4s (capped) to avoid
+                    // hammering the GPU during DirectX surface rebuilds.
+                    _consecutiveCaptureFailures++;
+                    _captureBackoffMs = Math.Min(4000, 500 * (1 << Math.Min(_consecutiveCaptureFailures - 1, 3)));
+
+                    if ((DateTime.Now - _lastCaptureBackoffLog).TotalSeconds >= 5)
+                    {
+                        Console.WriteLine($"[WARN] Screen capture unavailable (fail #{_consecutiveCaptureFailures}, backoff {_captureBackoffMs}ms) — SE reconnecting?");
+                        _lastCaptureBackoffLog = DateTime.Now;
+                    }
                     return;
+                }
+
+                // Capture succeeded — reset backoff
+                if (_consecutiveCaptureFailures > 0)
+                {
+                    Console.WriteLine($"[INFO] Screen capture recovered after {_consecutiveCaptureFailures} failures");
+                    _consecutiveCaptureFailures = 0;
+                    _captureBackoffMs = 0;
                 }
 
                 // ⚡ PARALLEL DUAL-FRAME RENDERING: Render both resolutions simultaneously
@@ -589,6 +620,8 @@ namespace CCTVCapture
                     {
                         singleFrame = resized;
                     }
+                    if (_useColorMode && _desaturateColorMode)
+                        AsciiConverter.DesaturateBitmap(singleFrame);
                 }
 
                 if (_currentCameraHasGrid)
@@ -603,6 +636,8 @@ namespace CCTVCapture
                     {
                         gridFrame = resized;
                     }
+                    if (_useColorMode && _desaturateColorMode)
+                        AsciiConverter.DesaturateBitmap(gridFrame);
                 }
 
                 // Now parallelize the CPU-heavy ASCII conversion (thread-safe)
@@ -764,6 +799,8 @@ namespace CCTVCapture
                         fallbackProcessed = AsciiConverter.ApplyPostProcess(capture, _postProcessMode);
                         fallbackSrc = fallbackProcessed;
                     }
+                    if (_useColorMode && _desaturateColorMode)
+                        AsciiConverter.DesaturateBitmap(fallbackSrc);
 
                     string compressed;
                     string frameMode;

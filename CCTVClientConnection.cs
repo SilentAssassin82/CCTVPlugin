@@ -779,7 +779,8 @@ namespace CCTVPlugin
 							   $"UseDithering={_sharedConfig.UseDithering} DitherMode={_sharedConfig.DitherMode} " +
 							   $"PostProcessMode={_sharedConfig.PostProcessMode} " +
 							   $"GridPostProcessMode={_sharedConfig.GridPostProcessMode} " +
-							   $"LcdGridResolution={_sharedConfig.LcdGridResolution}";
+							   $"LcdGridResolution={_sharedConfig.LcdGridResolution} " +
+							   $"DesaturateColorMode={_sharedConfig.DesaturateColorMode}";
 				Send(config);
 				return;
 			}
@@ -1344,45 +1345,44 @@ namespace CCTVPlugin
 			int quadH = height / 2;
 
 			// Split full grid content into 4 quadrants.
-			// Grayscale source has height/2 rows (full image scaled to fit effectiveQuadH×2).
-			// Colour source has height rows (full image at 1:1).
-			string[] lines = content.Split('\n');
-			int minLines = isColor ? height : height / 2;
-			if (lines.Length < minLines)
-			{
-				Log.Warn($"[{Name}] ⚠️ Grid content has {lines.Length} lines, expected {minLines}");
-				return;
-			}
+				string[] lines = content.Split('\n');
+				if (lines.Length < 4)
+				{
+					Log.Warn($"[{Name}] ⚠️ Grid content has {lines.Length} lines, need at least 4");
+					return;
+				}
 
-			// SE Monospace grayscale chars have a ~2:1 height-to-width aspect ratio.
-			// At GridFontSize=0.1 (calibrated for colour), grayscale chars are half as wide,
-			// so 181 chars only fill the left ~50% of each panel — the right side appears blank.
-			// Fix: double the font size for grayscale so chars fill the full panel width, and
-			// halve the row count so the content doesn't overflow the panel vertically.
-			// The source is pre-scaled to height/2 rows so all rows map to the full image.
-			float gridFontSize;
-			int effectiveQuadH;
-			if (isColor)
-			{
-				gridFontSize    = _sharedConfig.GridFontSize;
-				effectiveQuadH  = quadH;           // 181 rows per quadrant
-			}
-			else
-			{
-				gridFontSize    = _sharedConfig.GridFontSize * 2f;
-				effectiveQuadH  = quadH / 2;       // 90 rows per quadrant (2× font, full coverage)
-			}
+				// Font size: grayscale chars are ~half the width of colour chars in SE Monospace,
+				// so grayscale uses 2× the base GridFontSize to fill each panel horizontally.
+				float gridFontSize = isColor
+					? _sharedConfig.GridFontSize
+					: _sharedConfig.GridFontSize * 2f;
 
-			// GridVerticalOffset adds extra rows to the top quadrants (TL/TR),
-			// pushing their content further down the LCD panel and closing the
-			// vertical seam between top and bottom physical panels.
-			int vOffset = Math.Min(_sharedConfig.GridVerticalOffset, effectiveQuadH);
-			int topQuadH = effectiveQuadH + vOffset;
+				// Derive per-quadrant row count from the actual frame.
+				// The ASCII converter already outputs the right number of rows:
+				//   Colour: lines.Length == height      → effectiveQuadH == height/2
+				//   Gray:   lines.Length == height/2.4   → effectiveQuadH ≈ height/4.8
+				// Using lines.Length/2 auto-adapts to match the panel's visible capacity.
+				int effectiveQuadH = lines.Length / 2;
 
-			string tlContent = ExtractQuadrant(lines, 0,     0,              quadW, topQuadH);
-			string trContent = ExtractQuadrant(lines, quadW, 0,              quadW, topQuadH);
-			string blContent = ExtractQuadrant(lines, 0,     effectiveQuadH, quadW, effectiveQuadH);
-			string brContent = ExtractQuadrant(lines, quadW, effectiveQuadH, quadW, effectiveQuadH);
+			// GridVerticalOffset: positive creates overlap at the seam to close the
+			// physical gap between LCD blocks.
+			int vOffset = _sharedConfig.GridVerticalOffset;
+			int tlStartY = Math.Max(0, Math.Min(vOffset, effectiveQuadH - 1));
+			int blStartY = Math.Max(0, effectiveQuadH - vOffset);
+
+			// GridHorizontalOffset: same principle for the vertical seam.
+			int hOffset = _sharedConfig.GridHorizontalOffset;
+			int tlStartX = Math.Max(0, Math.Min(hOffset, quadW - 1));
+			int trStartX = Math.Max(0, quadW - hOffset);
+
+			if (vOffset != 0 || hOffset != 0)
+				Log.Debug($"[{Name}] GridOffset: v={vOffset} h={hOffset}, tlStartY={tlStartY}, blStartY={blStartY}, tlStartX={tlStartX}, trStartX={trStartX}");
+
+			string tlContent = ExtractQuadrant(lines, tlStartX, tlStartY, quadW, effectiveQuadH);
+			string trContent = ExtractQuadrant(lines, trStartX, tlStartY, quadW, effectiveQuadH);
+			string blContent = ExtractQuadrant(lines, tlStartX, blStartY, quadW, effectiveQuadH);
+			string brContent = ExtractQuadrant(lines, trStartX, blStartY, quadW, effectiveQuadH);
 
 			// Build full LCD names: "LCD_TV Test01_TL" format
 			// Pattern: <Prefix><space><BaseName><Quadrant>
@@ -1410,7 +1410,7 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Extract a quadrant from the full 362×362 content.
+		/// Extract a quadrant from the full grid content.
 		/// startX, startY: top-left corner of quadrant in the full image
 		/// width, height: dimensions of the quadrant to extract
 		/// </summary>

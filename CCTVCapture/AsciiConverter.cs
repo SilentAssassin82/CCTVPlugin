@@ -97,6 +97,43 @@ namespace CCTVCapture
         }
 
         /// <summary>
+        /// Desaturates a bitmap in-place using fast LockBits.
+        /// Sets R=G=B=luminance for every pixel so the color char encoder
+        /// produces square-pixel grayscale output (no 1:2 aspect correction needed).
+        /// </summary>
+        public static void DesaturateBitmap(Bitmap image)
+        {
+            int width = image.Width;
+            int height = image.Height;
+
+            BitmapData data = image.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadWrite,
+                PixelFormat.Format24bppRgb);
+
+            int stride = data.Stride;
+            byte[] pixels = new byte[stride * height];
+            Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
+
+            for (int y = 0; y < height; y++)
+            {
+                int rowOffset = y * stride;
+                for (int x = 0; x < width; x++)
+                {
+                    int idx = rowOffset + x * 3;
+                    // Format24bppRgb is BGR order
+                    byte gray = (byte)(pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f);
+                    pixels[idx]     = gray; // B
+                    pixels[idx + 1] = gray; // G
+                    pixels[idx + 2] = gray; // R
+                }
+            }
+
+            Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+            image.UnlockBits(data);
+        }
+
+        /// <summary>
         /// Apply post-processing filter to bitmap before ASCII conversion
         /// Uses fast LockBits for performance (~2-5ms overhead)
         /// </summary>
@@ -578,7 +615,9 @@ namespace CCTVCapture
             char[] charRamp = WHIP_RAMP;
 
             // SE LCD characters are roughly 1:2 (width:height).
-            // Grid: targetHeight/2 fills exactly the 2×effectiveQuadH the grid consumes.
+            // Grid: targetHeight/2 preserves full vertical resolution for the 2×2 split.
+            // The small vertical seam gap is closed by GridVerticalOffset (default 5)
+            // which overlaps the top/bottom quadrants at the seam without losing resolution.
             // Single: /2.1 trims ~5 rows vs /2 to prevent the bottom row being clipped —
             // SE's Monospace chars are fractionally taller than 2:1 at the higher 484-grid
             // resolution, causing a ~7% height overshoot with a straight /2 divisor.
@@ -732,7 +771,7 @@ namespace CCTVCapture
         /// </summary>
         public static string ConvertToAsciiDithered(Bitmap image, int targetWidth, int targetHeight, bool forGrid = false)
         {
-            // Grid: targetHeight/2 fills exactly the 2×effectiveQuadH the grid consumes.
+            // Grid: targetHeight/2 preserves full vertical resolution (see ConvertToAscii).
             // Single: /2.1 trims ~5 rows to prevent bottom clip (see ConvertToAscii comment).
             int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight / 2.1f);
 
@@ -839,7 +878,7 @@ namespace CCTVCapture
         public static string ConvertToAsciiOrdered(Bitmap image, int targetWidth, int targetHeight, bool forGrid = false)
         {
             // SE LCD characters are roughly 1:2 (width:height).
-            // Grid: targetHeight/2 fills exactly the 2×effectiveQuadH the grid consumes.
+            // Grid: targetHeight/2 preserves full vertical resolution (see ConvertToAscii).
             // Single: /2.1 trims ~5 rows to prevent bottom clip (see ConvertToAscii comment).
             int adjustedHeight = forGrid ? targetHeight / 2 : (int)(targetHeight / 2.1f);
 

@@ -29,18 +29,30 @@ namespace CCTVCapture
         }
 
         /// <summary>
-        /// Captures a specific region of the screen
+        /// Captures a specific region of the screen.
+        /// Returns null if the graphics subsystem is unavailable (e.g. during SE reconnect
+        /// when DirectX surfaces are being rebuilt).
         /// </summary>
         public static Bitmap CaptureRegion(int x, int y, int width, int height)
         {
-            Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-            
-            using (Graphics g = Graphics.FromImage(bitmap))
+            try
             {
-                g.CopyFromScreen(x, y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
-            }
+                Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
 
-            return bitmap;
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.CopyFromScreen(x, y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+                }
+
+                return bitmap;
+            }
+            catch (ExternalException)
+            {
+                // GDI+ failure — graphics driver busy or surfaces being rebuilt (SE reconnecting).
+                // Also covers Win32Exception (subclass of ExternalException).
+                // Return null so the caller can back off instead of crashing the driver.
+                return null;
+            }
         }
 
         /// <summary>
