@@ -40,6 +40,7 @@ namespace CCTVPlugin
         private float _proximityCheckRadius = 150f;
         private int _lcdGridResolution = 362;
         private bool _desaturateColorMode = false;
+        private bool _cropCaptureToSquare = true;
 
         // Multi-client support
         private List<CCTVClientInstanceConfig> _fakeClientInstances = new List<CCTVClientInstanceConfig>();
@@ -234,6 +235,23 @@ namespace CCTVPlugin
             set
             {
                 _desaturateColorMode = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// When enabled, the capture client crops the viewport to a center square before
+        /// resizing. Produces correct 1:1 proportions on the LCD but loses the left/right
+        /// edges of a 16:9 viewport. When disabled, the full viewport is stretched to fit
+        /// — wider field of view but horizontally compressed.
+        /// </summary>
+        [XmlElement("CropCaptureToSquare")]
+        public bool CropCaptureToSquare
+        {
+            get => _cropCaptureToSquare;
+            set
+            {
+                _cropCaptureToSquare = value;
                 OnPropertyChanged();
             }
         }

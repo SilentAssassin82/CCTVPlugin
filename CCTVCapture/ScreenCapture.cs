@@ -88,7 +88,7 @@ namespace CCTVCapture
         /// <summary>
         /// Captures the center portion of the Space Engineers window (viewport area)
         /// </summary>
-        public static Bitmap CaptureGameViewport(int targetWidth, int targetHeight)
+        public static Bitmap CaptureGameViewport(int targetWidth, int targetHeight, bool cropToSquare = true)
         {
             var window = FindSpaceEngineersWindow();
             if (!window.HasValue)
@@ -115,21 +115,59 @@ namespace CCTVCapture
             int centerY = viewportY + (viewportHeight - captureHeight) / 2;
 
             Bitmap fullCapture = CaptureRegion(centerX, centerY, captureWidth, captureHeight);
+            if (fullCapture == null) return null;
 
-            // Resize to target dimensions if needed
-            if (captureWidth != targetWidth || captureHeight != targetHeight)
+            if (cropToSquare)
             {
-                Bitmap resized = new Bitmap(targetWidth, targetHeight);
-                using (Graphics g = Graphics.FromImage(resized))
+                // Crop to square (center crop) before resizing so a 16:9 source
+                // isn't squashed into a 1:1 target.  This lets SE run at a normal
+                // resolution without aspect-ratio distortion on the LCD output.
+                int cropSize = Math.Min(captureWidth, captureHeight);
+                int cropX = (captureWidth - cropSize) / 2;
+                int cropY = (captureHeight - cropSize) / 2;
+
+                Bitmap cropped = new Bitmap(cropSize, cropSize);
+                using (Graphics g = Graphics.FromImage(cropped))
                 {
-                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(fullCapture, 0, 0, targetWidth, targetHeight);
+                    g.DrawImage(fullCapture,
+                        new Rectangle(0, 0, cropSize, cropSize),
+                        new Rectangle(cropX, cropY, cropSize, cropSize),
+                        GraphicsUnit.Pixel);
                 }
                 fullCapture.Dispose();
-                return resized;
-            }
 
-            return fullCapture;
+                // Resize cropped square to target dimensions
+                if (cropSize != targetWidth || cropSize != targetHeight)
+                {
+                    Bitmap resized = new Bitmap(targetWidth, targetHeight);
+                    using (Graphics g = Graphics.FromImage(resized))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(cropped, 0, 0, targetWidth, targetHeight);
+                    }
+                    cropped.Dispose();
+                    return resized;
+                }
+
+                return cropped;
+            }
+            else
+            {
+                // Stretch full viewport to target (wider FOV, distorted proportions)
+                if (captureWidth != targetWidth || captureHeight != targetHeight)
+                {
+                    Bitmap resized = new Bitmap(targetWidth, targetHeight);
+                    using (Graphics g = Graphics.FromImage(resized))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(fullCapture, 0, 0, targetWidth, targetHeight);
+                    }
+                    fullCapture.Dispose();
+                    return resized;
+                }
+
+                return fullCapture;
+            }
         }
     }
 }

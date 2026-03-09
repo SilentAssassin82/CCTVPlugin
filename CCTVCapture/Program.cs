@@ -31,6 +31,7 @@ namespace CCTVCapture
         private static CCTVCommon.PostProcessMode _postProcessMode = CCTVCommon.PostProcessMode.None;
         private static CCTVCommon.PostProcessMode _gridPostProcessMode = CCTVCommon.PostProcessMode.LightBlur;
         private static bool _desaturateColorMode = false;
+        private static bool _cropToSquare = true;
 
         // Track current camera's LCD setup (for dual-resolution rendering)
         private static bool _currentCameraHasSingleLcd = false;
@@ -549,6 +550,10 @@ namespace CCTVCapture
                             if (bool.TryParse(val, out bool desat))
                                 _desaturateColorMode = desat;
                             break;
+                        case "CropCaptureToSquare":
+                            if (bool.TryParse(val, out bool crop))
+                                _cropToSquare = crop;
+                            break;
                     }
                 }
 
@@ -571,7 +576,7 @@ namespace CCTVCapture
                 if (_verboseLogging)
                     Console.WriteLine("[DEBUG] Capturing screen...");
 
-                Bitmap capture = ScreenCapture.CaptureGameViewport(_captureWidth, _captureHeight);
+                Bitmap capture = ScreenCapture.CaptureGameViewport(_captureWidth, _captureHeight, _cropToSquare);
 
                 if (capture == null)
                 {

@@ -173,6 +173,7 @@ LCD_TVCamera Hangar  →  LCD_TV Hangar
 <CaptureFps>2</CaptureFps>
 <UseColorMode>true</UseColorMode>
 <DesaturateColorMode>false</DesaturateColorMode>
+<CropCaptureToSquare>true</CropCaptureToSquare>
 <GridFontSize>0.1</GridFontSize>
 <GridVerticalOffset>0</GridVerticalOffset>
 <SingleLcdFontSize>0.080</SingleLcdFontSize>
@@ -185,6 +186,8 @@ LCD_TVCamera Hangar  →  LCD_TV Hangar
 `GridFontSize` — base font size for 2×2 grid panels (0.05–0.15). Changing this value auto-calculates `LcdGridResolution` to fill the panel edge-to-edge (e.g. 0.055 → 658, 0.075 → 482, 0.100 → 362). Grayscale automatically doubles this value.
 
 `DesaturateColorMode` — when `true` (and `UseColorMode` is also `true`), the captured image is desaturated to grayscale before encoding into SE color characters. This produces **square-pixel B&W** output using the color char pipeline — no 1:2 aspect ratio issues, auto-fit resolution works correctly, and dithering still applies. The classic grayscale mode (`UseColorMode=false`) is kept for LCD font tint support.
+
+`CropCaptureToSquare` — when `true` (default), center-crops the SE viewport to a square before resizing. Fixes the ~44% horizontal squash from stretching a 16:9 capture into a 1:1 LCD. SE can run at any normal resolution. Set to `false` for the legacy wider-FOV stretched mode.
 
 `GridVerticalOffset` — row offset for the 2×2 grid to close the physical seam between top and bottom LCD panels (−30 to +30, default 5). With auto-fit resolution the offset should be 0 or very small.
 
@@ -232,6 +235,8 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 
 - True color video — SE's hidden 0xE100 palette (512 colors, 9-bit RGB)
 - **Desaturate (B&W) mode** — square-pixel grayscale via the color char pipeline; no aspect ratio issues, dithering still applies
+- **Crop to Square** — center-crops 16:9 viewport to 1:1 before conversion; correct proportions without needing a custom SE resolution. Toggle off for wider FOV with stretched proportions
+- **Night vision mode** — classic grayscale (`UseColorMode=false`) with green `LcdFontTint` (e.g. `0,255,0`) produces a convincing starlight-scope look at ~6× less bandwidth than colour
 - **Auto-fit resolution** — `GridFontSize` automatically calculates `LcdGridResolution` so content fills each panel edge-to-edge with no seam
 - GZip frame compression (~14× ratio over uncompressed; negligible bandwidth)
 - Configurable LCD render resolution — single slider controls capture and grid resolution (single LCD = half)
@@ -283,9 +288,11 @@ Confirm the port matches the plugin config and no firewall is blocking it. For m
 ## Changelog
 
 ### v1.4.0
+- **Crop to Square:** New `CropCaptureToSquare` option (on by default) center-crops the 16:9 SE viewport to 1:1 before resizing, fixing the ~44% horizontal squash that affected all previous builds. SE can run at any normal resolution — no custom 800×800 resolution needed. Toggle off for wider FOV with stretched proportions.
 - **Auto-fit grid resolution:** `GridFontSize` now automatically calculates `LcdGridResolution` so the rendered content exactly fills each LCD panel at the chosen font size. At font 0.055 the grid is 658×658 (329 chars per panel), at 0.100 it's 362×362 (181 per panel). No manual offset needed — simple 4-way equal split.
-- **Desaturate (B&W) mode:** New `DesaturateColorMode` option strips colour from the captured image before encoding into SE color characters, producing square-pixel grayscale output. Uses the same color char pipeline as full colour — no 1:2 aspect ratio issues, auto-fit resolution works correctly, and dithering still applies. The classic grayscale mode (`UseColorMode=false`) is kept for LCD font tint support.
+- **Desaturate (B&W) mode:** New `DesaturateColorMode` option strips colour from the captured image before encoding into SE color characters, producing square-pixel grayscale output. Uses the same color char pipeline as full colour — no 1:2 aspect ratio issues, auto-fit resolution works correctly, and dithering still applies. The classic grayscale mode (`UseColorMode=false`) is kept for LCD font tint support (e.g. green night-vision look).
 - **Resolution cap raised to 700:** Both the plugin and CCTVCapture now accept grid resolutions up to 700 (was 484/512), supporting smaller font sizes that need more characters per panel.
+- **Performance diagnostics:** `Update()` now tracks per-tick timing with `Stopwatch`. Heartbeat logs include `perf: worst=Xms write=Xms prox=Xms slow=N` and any single tick exceeding 16ms triggers an immediate `⏱️ SLOW TICK` warning in the Torch log.
 - **Grid offset rework:** Reverted the padding-based offset approach to the original row-skipping method. With auto-fit resolution the offsets should be 0 or very small (only needed for the physical gap between LCD blocks).
 
 ### v1.3.0

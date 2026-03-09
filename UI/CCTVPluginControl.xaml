@@ -55,6 +55,11 @@
                 <TextBlock Text="  (grayscale via square color chars — requires Color Mode)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Crop to Square:" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding CropCaptureToSquare}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (correct proportions; off = wider FOV, stretched)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Dithering:" Width="160" VerticalAlignment="Center"/>
                 <ComboBox Width="150" SelectedValue="{Binding DitherMode}" SelectedValuePath="Content" VerticalAlignment="Center">
                     <ComboBoxItem Content="None"/>

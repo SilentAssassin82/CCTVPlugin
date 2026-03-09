@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
@@ -140,6 +141,14 @@ namespace CCTVPlugin
 		private int _lcdWritesGrid;     // successful WriteGridLCDs calls
 		private int _lcdMisses;          // FindLCDByName returned null during a write
 		private int _lcdEntityFails;     // FindLCDByName failed due to entity snapshot error
+
+		// Performance timing: track worst-case game thread stalls per heartbeat interval.
+		// Any single Update() call that exceeds SLOW_TICK_THRESHOLD_MS is logged immediately.
+		private const double SLOW_TICK_THRESHOLD_MS = 16.0; // 1 game tick at 60 TPS
+		private double _worstTickMs;
+		private double _worstWriteMs;
+		private double _worstProximityMs;
+		private int _slowTickCount;
 
 		// Periodic LCD flush: every 10 minutes, toggle ContentType on all cached LCDs
 		// to force SE's renderer to rebuild the display.  Works around SE sometimes
@@ -780,7 +789,8 @@ namespace CCTVPlugin
 							   $"PostProcessMode={_sharedConfig.PostProcessMode} " +
 							   $"GridPostProcessMode={_sharedConfig.GridPostProcessMode} " +
 							   $"LcdGridResolution={_sharedConfig.LcdGridResolution} " +
-							   $"DesaturateColorMode={_sharedConfig.DesaturateColorMode}";
+							   $"DesaturateColorMode={_sharedConfig.DesaturateColorMode} " +
+							   $"CropCaptureToSquare={_sharedConfig.CropCaptureToSquare}";
 				Send(config);
 				return;
 			}
@@ -971,6 +981,8 @@ namespace CCTVPlugin
 		/// </summary>
 		public void Update()
 		{
+			var tickSw = Stopwatch.StartNew();
+
 			// Capture game thread ID on first call (Update is always on game thread)
 			if (_gameThreadId == -1)
 				_gameThreadId = Thread.CurrentThread.ManagedThreadId;
@@ -992,7 +1004,9 @@ namespace CCTVPlugin
 					$"cycle {_cameraCycleTicks}/{_dynamicCycleIntervalTicks}t, " +
 					$"manual={_isManualMode}, autoCycle={_sharedConfig.EnableAutoCameraCycling}, " +
 					$"queue={queueCount}, preTP={_preTeleportSent}, nearby={_anyPlayerNearby}, " +
-					$"rx={rxSnap}, lcdW={wSingle}+{wGrid}, miss={miss}, eFail={eFail}");
+					$"rx={rxSnap}, lcdW={wSingle}+{wGrid}, miss={miss}, eFail={eFail}, " +
+					$"perf: worst={_worstTickMs:F1}ms write={_worstWriteMs:F1}ms prox={_worstProximityMs:F1}ms slow={_slowTickCount}");
+				_worstTickMs = 0; _worstWriteMs = 0; _worstProximityMs = 0; _slowTickCount = 0;
 			}
 
 			if (!IsConnected)
@@ -1048,7 +1062,13 @@ namespace CCTVPlugin
 			if (++_proximityCheckTicks >= PROXIMITY_CHECK_INTERVAL)
 			{
 				_proximityCheckTicks = 0;
+				var proxSw = Stopwatch.StartNew();
 				CheckPlayerProximity();
+				proxSw.Stop();
+				if (proxSw.Elapsed.TotalMilliseconds > _worstProximityMs)
+					_worstProximityMs = proxSw.Elapsed.TotalMilliseconds;
+				if (proxSw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
+					Log.Warn($"[{Name}] ⏱️ SLOW proximity check: {proxSw.Elapsed.TotalMilliseconds:F1}ms");
 			}
 
 			// Periodic LCD flush: toggle ContentType to NONE on all cached panels,
@@ -1095,16 +1115,33 @@ namespace CCTVPlugin
 			{
 				if (singleTick && _hasPendingSingleFrame)
 				{
+					var sw = Stopwatch.StartNew();
 					WriteFrameToLCDs(_pendingSingleFrame.width, _pendingSingleFrame.height, _pendingSingleFrame.content, _pendingSingleFrame.isColor);
+					sw.Stop();
 					_hasPendingSingleFrame = false;
-					Log.Debug($"[{Name}] ⚙️ Single LCD write ({_pendingSingleFrame.width}×{_pendingSingleFrame.height})");
+					if (sw.Elapsed.TotalMilliseconds > _worstWriteMs) _worstWriteMs = sw.Elapsed.TotalMilliseconds;
+					if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
+						Log.Warn($"[{Name}] ⏱️ SLOW single LCD write: {sw.Elapsed.TotalMilliseconds:F1}ms ({_pendingSingleFrame.width}×{_pendingSingleFrame.height})");
 				}
 				if (gridTick && _hasPendingGridFrame)
 				{
+					var sw = Stopwatch.StartNew();
 					WriteFrameToLCDs(_pendingGridFrame.width, _pendingGridFrame.height, _pendingGridFrame.content, _pendingGridFrame.isColor);
+					sw.Stop();
 					_hasPendingGridFrame = false;
-					Log.Debug($"[{Name}] ⚙️ Grid LCD write ({_pendingGridFrame.width}×{_pendingGridFrame.height})");
+					if (sw.Elapsed.TotalMilliseconds > _worstWriteMs) _worstWriteMs = sw.Elapsed.TotalMilliseconds;
+					if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
+						Log.Warn($"[{Name}] ⏱️ SLOW grid LCD write: {sw.Elapsed.TotalMilliseconds:F1}ms ({_pendingGridFrame.width}×{_pendingGridFrame.height})");
 				}
+			}
+
+			tickSw.Stop();
+			if (tickSw.Elapsed.TotalMilliseconds > _worstTickMs)
+				_worstTickMs = tickSw.Elapsed.TotalMilliseconds;
+			if (tickSw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
+			{
+				_slowTickCount++;
+				Log.Warn($"[{Name}] ⏱️ SLOW TICK: {tickSw.Elapsed.TotalMilliseconds:F1}ms (total Update call)");
 			}
 		}
 
