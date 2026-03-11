@@ -42,6 +42,11 @@ namespace CCTVPlugin
         private bool _desaturateColorMode = false;
         private bool _cropCaptureToSquare = true;
 
+        // Suppresses ValidateFpsRatio during XML deserialization so property
+        // setters don't fire against stale default values before all elements
+        // have been loaded.  Set to true by Load() after deserialization.
+        private bool _loaded = false;
+
         // Multi-client support
         private List<CCTVClientInstanceConfig> _fakeClientInstances = new List<CCTVClientInstanceConfig>();
         private bool _useMultiClientMode = false;
@@ -470,9 +475,13 @@ namespace CCTVPlugin
         /// <summary>
         /// Warns and auto-corrects when DisplayFps exceeds CaptureFps.
         /// DisplayFps can now equal CaptureFps (1:1 ratio) for maximum LCD refresh.
+        /// Skipped while _loaded is false (during XML deserialization) to avoid
+        /// firing against stale default values before all elements are loaded.
         /// </summary>
         private void ValidateFpsRatio()
         {
+            if (!_loaded) return;
+
             if (_displayFps > _captureFps)
             {
                 Log.Warn($"⚠️ DisplayFps ({_displayFps}) exceeds CaptureFps ({_captureFps}). " +
@@ -553,8 +562,10 @@ namespace CCTVPlugin
                     using (var reader = new StreamReader(path))
                     {
                         var config = (CCTVPluginConfig)serializer.Deserialize(reader);
-                        Log.Info($"Loaded config from {path}");
-                        return config;
+                            config._loaded = true;
+                            config.ValidateFpsRatio();
+                            Log.Info($"Loaded config from {path}");
+                            return config;
                     }
                 }
             }
@@ -563,7 +574,9 @@ namespace CCTVPlugin
                 Log.Error(ex, $"Failed to load config from {path}, using defaults");
             }
 
-            return new CCTVPluginConfig();
+            var defaults = new CCTVPluginConfig();
+            defaults._loaded = true;
+            return defaults;
         }
 
         public void Save(string path)

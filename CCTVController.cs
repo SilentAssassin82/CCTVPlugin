@@ -97,6 +97,11 @@ namespace CCTVPlugin
         // Async frame processing - thread-safe queue for decoded frames ready to write
         private readonly ConcurrentQueue<ProcessedFrame> _processedFrameQueue = new ConcurrentQueue<ProcessedFrame>();
 
+        // Reusable line-offset buffers for SplitFrameIntoQuadrants — avoids
+        // asciiFrame.Split('\n') which creates 362+ new strings on the game thread.
+        private int[] _lineStarts;
+        private int[] _lineLengths;
+
         // Frame queue system: Store incoming frames at capture FPS, display at lower display FPS
         // This allows client to send frames at 4 FPS while server displays at 2 FPS
         private readonly Dictionary<long, Queue<BufferedFrame>> _frameQueues = new Dictionary<long, Queue<BufferedFrame>>();
@@ -1991,22 +1996,38 @@ namespace CCTVPlugin
 
         /// <summary>
         /// Splits an ASCII frame into 4 quadrants for 2×2 LCD grid display.
-        /// Grid resolution is auto-calculated from GridFontSize so content fills each
-        /// panel edge-to-edge — simple midpoint split, no padding needed.
-        /// Offsets (GridVerticalOffset / GridHorizontalOffset) provide optional
-        /// fine-tuning for the physical gap between LCD blocks.
+        /// Uses index-based line scanning with reusable buffers to avoid
+        /// asciiFrame.Split('\n') + Substring allocations (~512 KB per call).
         /// </summary>
         private (string topLeft, string topRight, string bottomLeft, string bottomRight) SplitFrameIntoQuadrants(string asciiFrame, int width, int height, bool isColor = true)
         {
-            var lines = asciiFrame.Split(new[] { '\n' }, StringSplitOptions.None);
+            // Count lines without allocating a string[]
+            int lineCount = 1;
+            for (int i = 0; i < asciiFrame.Length; i++)
+                if (asciiFrame[i] == '\n') lineCount++;
 
             int midWidth = width / 2;
+            int midHeight = lineCount / 2;
 
-            // Use the actual line count to derive the per-quadrant row count.
-            // This auto-adapts to whatever the ASCII converter produced:
-            //   Colour frames: lines.Length == height      → midHeight == height/2
-            //   Grayscale grid: lines.Length == height/2.4  → midHeight ≈ height/4.8
-            int midHeight = lines.Length / 2;
+            // Grow reusable buffers only when needed — no per-frame allocation.
+            if (_lineStarts == null || _lineStarts.Length < lineCount)
+            {
+                _lineStarts  = new int[lineCount];
+                _lineLengths = new int[lineCount];
+            }
+
+            int li = 0;
+            int ls = 0;
+            for (int i = 0; i <= asciiFrame.Length; i++)
+            {
+                if (i == asciiFrame.Length || asciiFrame[i] == '\n')
+                {
+                    _lineStarts[li]  = ls;
+                    _lineLengths[li] = i - ls;
+                    li++;
+                    ls = i + 1;
+                }
+            }
 
             // GridVerticalOffset: positive creates overlap at the seam to close the
             // physical gap between LCD blocks.  Top panels skip vOffset rows at the
@@ -2021,32 +2042,35 @@ namespace CCTVPlugin
             int tlStartX = Math.Max(0, Math.Min(hOffset, midWidth - 1));
             int trStartX = Math.Max(0, midWidth - hOffset);
 
-            var tlBuilder = new StringBuilder();
-            var trBuilder = new StringBuilder();
-            var blBuilder = new StringBuilder();
-            var brBuilder = new StringBuilder();
+            var tlBuilder = new StringBuilder(midWidth * midHeight + midHeight);
+            var trBuilder = new StringBuilder(midWidth * midHeight + midHeight);
+            var blBuilder = new StringBuilder(midWidth * midHeight + midHeight);
+            var brBuilder = new StringBuilder(midWidth * midHeight + midHeight);
 
-            for (int y = 0; y < lines.Length; y++)
+            for (int y = 0; y < lineCount; y++)
             {
-                string line = lines[y];
-                if (line.Length < width)
-                    line = line.PadRight(width, ' ');
+                int lineStart = _lineStarts[y];
+                int lineLen   = _lineLengths[y];
 
                 // Top half
                 if (y >= tlStartY && y < tlStartY + midHeight)
                 {
-                    // Top-left
+                    // Top-left — slice directly from asciiFrame, no Substring
                     {
-                        int endX = Math.Min(tlStartX + midWidth, line.Length);
+                        int endX = Math.Min(tlStartX + midWidth, lineLen);
                         if (endX > tlStartX)
-                            tlBuilder.Append(line.Substring(tlStartX, endX - tlStartX));
+                            tlBuilder.Append(asciiFrame, lineStart + tlStartX, endX - tlStartX);
+                        else if (lineLen < width)
+                            tlBuilder.Append(' ', midWidth); // line too short, pad
                         if (y < tlStartY + midHeight - 1) tlBuilder.Append('\n');
                     }
                     // Top-right
                     {
-                        int endX = Math.Min(trStartX + midWidth, line.Length);
+                        int endX = Math.Min(trStartX + midWidth, lineLen);
                         if (endX > trStartX)
-                            trBuilder.Append(line.Substring(trStartX, endX - trStartX));
+                            trBuilder.Append(asciiFrame, lineStart + trStartX, endX - trStartX);
+                        else if (lineLen < width)
+                            trBuilder.Append(' ', midWidth);
                         if (y < tlStartY + midHeight - 1) trBuilder.Append('\n');
                     }
                 }
@@ -2055,16 +2079,20 @@ namespace CCTVPlugin
                 {
                     // Bottom-left
                     {
-                        int endX = Math.Min(tlStartX + midWidth, line.Length);
+                        int endX = Math.Min(tlStartX + midWidth, lineLen);
                         if (endX > tlStartX)
-                            blBuilder.Append(line.Substring(tlStartX, endX - tlStartX));
+                            blBuilder.Append(asciiFrame, lineStart + tlStartX, endX - tlStartX);
+                        else if (lineLen < width)
+                            blBuilder.Append(' ', midWidth);
                         if (y < blEndY - 1) blBuilder.Append('\n');
                     }
                     // Bottom-right
                     {
-                        int endX = Math.Min(trStartX + midWidth, line.Length);
+                        int endX = Math.Min(trStartX + midWidth, lineLen);
                         if (endX > trStartX)
-                            brBuilder.Append(line.Substring(trStartX, endX - trStartX));
+                            brBuilder.Append(asciiFrame, lineStart + trStartX, endX - trStartX);
+                        else if (lineLen < width)
+                            brBuilder.Append(' ', midWidth);
                         if (y < blEndY - 1) brBuilder.Append('\n');
                     }
                 }
@@ -2076,12 +2104,35 @@ namespace CCTVPlugin
         /// <summary>
         /// Down-samples a frame to a smaller size using nearest-neighbor sampling
         /// Used when single LCD receives over-sized frame (e.g., 362×362 → 181×181)
-        /// Simple and fast, uses center-point sampling for better quality
+        /// Uses line-offset buffers to avoid Split/Substring allocations.
         /// </summary>
         private string DownsampleFrame(string asciiFrame, int srcWidth, int srcHeight, int destWidth, int destHeight)
         {
-            var lines = asciiFrame.Split(new[] { '\n' }, StringSplitOptions.None);
-            var resultBuilder = new StringBuilder();
+            // Build line offsets using the reusable buffers
+            int lineCount = 1;
+            for (int i = 0; i < asciiFrame.Length; i++)
+                if (asciiFrame[i] == '\n') lineCount++;
+
+            if (_lineStarts == null || _lineStarts.Length < lineCount)
+            {
+                _lineStarts  = new int[lineCount];
+                _lineLengths = new int[lineCount];
+            }
+
+            int li = 0;
+            int ls = 0;
+            for (int i = 0; i <= asciiFrame.Length; i++)
+            {
+                if (i == asciiFrame.Length || asciiFrame[i] == '\n')
+                {
+                    _lineStarts[li]  = ls;
+                    _lineLengths[li] = i - ls;
+                    li++;
+                    ls = i + 1;
+                }
+            }
+
+            var resultBuilder = new StringBuilder(destWidth * destHeight + destHeight);
 
             // Calculate sampling ratios
             float xRatio = (float)srcWidth / destWidth;
@@ -2090,36 +2141,26 @@ namespace CCTVPlugin
             // Sample from center of each destination pixel for better quality
             for (int destY = 0; destY < destHeight; destY++)
             {
-                var destLineBuilder = new StringBuilder(destWidth);
-
-                // Sample from the center of the source region
                 float srcYf = (destY + 0.5f) * yRatio;
                 int srcY = (int)srcYf;
+                if (srcY >= lineCount) srcY = lineCount - 1;
+                if (srcY < 0) srcY = 0;
 
-                if (srcY >= lines.Length)
-                    srcY = lines.Length - 1;
-                if (srcY < 0)
-                    srcY = 0;
-
-                string srcLine = lines[srcY];
-                if (srcLine.Length < srcWidth)
-                    srcLine = srcLine.PadRight(srcWidth, ' ');
+                int srcLineStart = _lineStarts[srcY];
+                int srcLineLen   = _lineLengths[srcY];
 
                 for (int destX = 0; destX < destWidth; destX++)
                 {
-                    // Sample from the center of the source region
                     float srcXf = (destX + 0.5f) * xRatio;
                     int srcX = (int)srcXf;
 
-                    if (srcX >= srcLine.Length)
-                        srcX = srcLine.Length - 1;
-                    if (srcX < 0)
-                        srcX = 0;
-
-                    destLineBuilder.Append(srcLine[srcX]);
+                    if (srcX >= srcLineLen)
+                        resultBuilder.Append(' '); // line too short, pad
+                    else
+                        resultBuilder.Append(asciiFrame[srcLineStart + srcX]);
                 }
 
-                resultBuilder.Append(destLineBuilder.ToString()).Append('\n');
+                resultBuilder.Append('\n');
             }
 
             return resultBuilder.ToString();

@@ -156,6 +156,12 @@ namespace CCTVPlugin
 		private int _lcdFlushTicks = 0;
 		private const int LCD_FLUSH_INTERVAL = 36000; // 10 minutes at 60 TPS
 
+		// Reusable line-offset buffers for WriteGridLCDs — avoids content.Split('\n')
+		// which creates 362+ new strings (~256 KB) on the game thread every grid write.
+		// Only accessed from the game thread so no synchronisation needed.
+		private int[] _lineStarts;
+		private int[] _lineLengths;
+
 		// Connection state
 		public bool IsConnected => _client != null && _client.Connected;
 		public string Name => _config.Name;
@@ -1122,6 +1128,7 @@ namespace CCTVPlugin
 					if (sw.Elapsed.TotalMilliseconds > _worstWriteMs) _worstWriteMs = sw.Elapsed.TotalMilliseconds;
 					if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
 						Log.Warn($"[{Name}] ⏱️ SLOW single LCD write: {sw.Elapsed.TotalMilliseconds:F1}ms ({_pendingSingleFrame.width}×{_pendingSingleFrame.height})");
+					_pendingSingleFrame = default; // Release content string reference for GC
 				}
 				if (gridTick && _hasPendingGridFrame)
 				{
@@ -1132,6 +1139,7 @@ namespace CCTVPlugin
 					if (sw.Elapsed.TotalMilliseconds > _worstWriteMs) _worstWriteMs = sw.Elapsed.TotalMilliseconds;
 					if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
 						Log.Warn($"[{Name}] ⏱️ SLOW grid LCD write: {sw.Elapsed.TotalMilliseconds:F1}ms ({_pendingGridFrame.width}×{_pendingGridFrame.height})");
+					_pendingGridFrame = default; // Release LOH content string reference for GC
 				}
 			}
 
@@ -1381,26 +1389,48 @@ namespace CCTVPlugin
 			int quadW = width / 2;
 			int quadH = height / 2;
 
-			// Split full grid content into 4 quadrants.
-				string[] lines = content.Split('\n');
-				if (lines.Length < 4)
+			// Index-based line scanning — avoids content.Split('\n') which creates
+			// 362+ new strings (~256 KB) on the game thread every grid write.
+			// Instead we record start-index and length of each line directly
+			// into reusable int[] buffers (< 3 KB, SOH).
+			int lineCount = 1;
+			for (int i = 0; i < content.Length; i++)
+				if (content[i] == '\n') lineCount++;
+
+			if (lineCount < 4)
+			{
+				Log.Warn($"[{Name}] ⚠️ Grid content has {lineCount} lines, need at least 4");
+				return;
+			}
+
+			// Grow reusable buffers only when needed — no per-frame allocation.
+			if (_lineStarts == null || _lineStarts.Length < lineCount)
+			{
+				_lineStarts  = new int[lineCount];
+				_lineLengths = new int[lineCount];
+			}
+
+			int li = 0;
+			int ls = 0;
+			for (int i = 0; i <= content.Length; i++)
+			{
+				if (i == content.Length || content[i] == '\n')
 				{
-					Log.Warn($"[{Name}] ⚠️ Grid content has {lines.Length} lines, need at least 4");
-					return;
+					_lineStarts[li]  = ls;
+					_lineLengths[li] = i - ls;
+					li++;
+					ls = i + 1;
 				}
+			}
 
-				// Font size: grayscale chars are ~half the width of colour chars in SE Monospace,
-				// so grayscale uses 2× the base GridFontSize to fill each panel horizontally.
-				float gridFontSize = isColor
-					? _sharedConfig.GridFontSize
-					: _sharedConfig.GridFontSize * 2f;
+			// Font size: grayscale chars are ~half the width of colour chars in SE Monospace,
+			// so grayscale uses 2× the base GridFontSize to fill each panel horizontally.
+			float gridFontSize = isColor
+				? _sharedConfig.GridFontSize
+				: _sharedConfig.GridFontSize * 2f;
 
-				// Derive per-quadrant row count from the actual frame.
-				// The ASCII converter already outputs the right number of rows:
-				//   Colour: lines.Length == height      → effectiveQuadH == height/2
-				//   Gray:   lines.Length == height/2.4   → effectiveQuadH ≈ height/4.8
-				// Using lines.Length/2 auto-adapts to match the panel's visible capacity.
-				int effectiveQuadH = lines.Length / 2;
+			// Derive per-quadrant row count from the actual frame.
+			int effectiveQuadH = lineCount / 2;
 
 			// GridVerticalOffset: positive creates overlap at the seam to close the
 			// physical gap between LCD blocks.
@@ -1416,10 +1446,10 @@ namespace CCTVPlugin
 			if (vOffset != 0 || hOffset != 0)
 				Log.Debug($"[{Name}] GridOffset: v={vOffset} h={hOffset}, tlStartY={tlStartY}, blStartY={blStartY}, tlStartX={tlStartX}, trStartX={trStartX}");
 
-			string tlContent = ExtractQuadrant(lines, tlStartX, tlStartY, quadW, effectiveQuadH);
-			string trContent = ExtractQuadrant(lines, trStartX, tlStartY, quadW, effectiveQuadH);
-			string blContent = ExtractQuadrant(lines, tlStartX, blStartY, quadW, effectiveQuadH);
-			string brContent = ExtractQuadrant(lines, trStartX, blStartY, quadW, effectiveQuadH);
+			string tlContent = ExtractQuadrant(content, lineCount, tlStartX, tlStartY, quadW, effectiveQuadH);
+			string trContent = ExtractQuadrant(content, lineCount, trStartX, tlStartY, quadW, effectiveQuadH);
+			string blContent = ExtractQuadrant(content, lineCount, tlStartX, blStartY, quadW, effectiveQuadH);
+			string brContent = ExtractQuadrant(content, lineCount, trStartX, blStartY, quadW, effectiveQuadH);
 
 			// Build full LCD names: "LCD_TV Test01_TL" format
 			// Pattern: <Prefix><space><BaseName><Quadrant>
@@ -1447,50 +1477,41 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Extract a quadrant from the full grid content.
-		/// startX, startY: top-left corner of quadrant in the full image
-		/// width, height: dimensions of the quadrant to extract
+		/// Extract a quadrant from the full grid content using pre-computed line offsets.
+		/// Uses sb.Append(string, startIndex, count) to slice directly from the original
+		/// content string — avoids 181 Substring allocations per quadrant (~90 KB each).
 		/// </summary>
-		private string ExtractQuadrant(string[] lines, int startX, int startY, int width, int height)
+		private string ExtractQuadrant(string content, int lineCount, int startX, int startY, int width, int height)
 		{
-			// Pre-allocate buffer: width chars per line + newlines
 			StringBuilder sb = new StringBuilder(width * height + height);
 
-			for (int y = 0; y < height && (startY + y) < lines.Length; y++)
+			for (int y = 0; y < height && (startY + y) < lineCount; y++)
 			{
-				string line = lines[startY + y];
+				int li = startY + y;
+				int ls = _lineStarts[li];
+				int ll = _lineLengths[li];
 
-				// Extract horizontal slice from this line
-				if (startX < line.Length)
+				if (startX < ll)
 				{
-					int endX = Math.Min(startX + width, line.Length);
-					int sliceWidth = endX - startX;
-					sb.Append(line.Substring(startX, sliceWidth));
+					int sliceWidth = Math.Min(width, ll - startX);
+					sb.Append(content, ls + startX, sliceWidth);
 
-					// Pad with spaces if line was too short
 					if (sliceWidth < width)
-					{
 						sb.Append(' ', width - sliceWidth);
-					}
 				}
 				else
 				{
-					// Line was too short, pad entire line with spaces
 					sb.Append(' ', width);
 				}
 
-				// Add newline between lines (but not after last line)
 				if (y < height - 1)
 					sb.Append('\n');
 			}
 
 			string result = sb.ToString();
 
-			// Debug: Log quadrant stats
 			if (startX == 0 && startY == 0)
-			{
 				Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {result.Length} chars (expected ~{width * height + height - 1})");
-			}
 
 			return result;
 		}
