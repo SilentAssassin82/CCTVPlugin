@@ -113,6 +113,13 @@ namespace CCTVPlugin
 		// execute inline instead of deadlocking via InvokeBlocking.
 		private int _gameThreadId = -1;
 
+		// Deferred GOTO queue: TeleportToCamera enqueues the SendMessageTo action
+		// instead of executing it inline.  Update() drains this queue at the start
+		// of the NEXT tick so the game thread never blocks mid-call-stack on Steam
+		// P2P networking (the root cause of the intermittent server hangs visible
+		// in the Windows Wait Chain as "waiting to finish network I/O").
+		private readonly ConcurrentQueue<Action> _pendingGotoActions = new ConcurrentQueue<Action>();
+
 		// Proximity gate: skip LCD writes when no players are nearby.
 		// CCTVCapture keeps streaming; frames are drained and discarded until a player returns.
 		private bool _anyPlayerNearby = true;       // optimistic default so LCDs start active
@@ -993,6 +1000,15 @@ namespace CCTVPlugin
 			if (_gameThreadId == -1)
 				_gameThreadId = Thread.CurrentThread.ManagedThreadId;
 
+			// Drain deferred GOTO actions (SendMessageTo).  These were queued by
+			// TeleportToCamera so the game thread never blocks on Steam P2P I/O
+			// inside a nested call (CycleToNextCamera → TeleportToCamera → SendMessageTo).
+			while (_pendingGotoActions.TryDequeue(out var gotoAction))
+			{
+				try { gotoAction(); }
+				catch (Exception ex) { Log.Error(ex, $"[{Name}] Error executing deferred GOTO action"); }
+			}
+
 			_updateCallCount++;
 
 			// Log update calls every 300 ticks (5 seconds) when connected
@@ -1191,8 +1207,8 @@ namespace CCTVPlugin
 		/// Teleport the fake client character to a camera's position.
 		/// Actually sends a multiplayer message to the client-side mod to move the spectator camera.
 		/// The character body never moves - only the spectator camera view changes.
-		/// Safe to call from any thread: executes directly on the game thread, or
-		/// marshals via Invoke when called from a background thread.
+		/// Safe to call from any thread: enqueues a deferred action that Update() drains
+		/// on the next game tick so the caller never blocks on Steam P2P networking.
 		/// </summary>
 		private void TeleportToCamera(CameraInfo camera)
 		{
@@ -1202,14 +1218,21 @@ namespace CCTVPlugin
 				return;
 			}
 
+			// Capture entity ID by value — the CameraInfo reference must not be used
+			// after the current call returns because the caller may mutate the list.
+			long entityId = camera.EntityId;
+			string displayName = camera.DisplayName;
+			ulong steamId = SteamId;
+			string connName = Name;
+
 			Action sendGoto = () =>
 			{
 				try
 				{
-					var cameraEntity = MyAPIGateway.Entities.GetEntityById(camera.EntityId) as Sandbox.Game.Entities.MyCameraBlock;
+					var cameraEntity = MyAPIGateway.Entities.GetEntityById(entityId) as Sandbox.Game.Entities.MyCameraBlock;
 					if (cameraEntity == null)
 					{
-						Log.Warn($"[{Name}] Camera entity {camera.EntityId} not found!");
+						Log.Warn($"[{connName}] Camera entity {entityId} not found!");
 						return;
 					}
 
@@ -1219,7 +1242,7 @@ namespace CCTVPlugin
 
 					// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
 					var ic = CultureInfo.InvariantCulture;
-					string gotoMessage = $"GOTO|{SteamId}|{camera.DisplayName}|{camera.EntityId}|" +
+					string gotoMessage = $"GOTO|{steamId}|{displayName}|{entityId}|" +
 									$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
 									$"{forward.X.ToString(ic)}|{forward.Y.ToString(ic)}|{forward.Z.ToString(ic)}|" +
 									$"{up.X.ToString(ic)}|{up.Y.ToString(ic)}|{up.Z.ToString(ic)}";
@@ -1229,25 +1252,22 @@ namespace CCTVPlugin
 					// Target only the spectator client — SendMessageToOthers broadcasts to
 					// ALL clients including the player, whose client-side message dispatch
 					// can interfere with cockpit seat transitions.
-					MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, SteamId);
+					MyAPIGateway.Multiplayer.SendMessageTo(MESSAGE_ID, data, steamId);
 
-					Log.Debug($"[{Name}] 📡 Sent GOTO message to mod for camera '{camera.DisplayName}' (SteamID: {SteamId})");
+					Log.Debug($"[{connName}] 📡 Sent GOTO message to mod for camera '{displayName}' (SteamID: {steamId})");
 				}
 				catch (Exception ex)
 				{
-					Log.Error(ex, $"[{Name}] Failed to send camera position to mod");
+					Log.Error(ex, $"[{connName}] Failed to send camera position to mod");
 				}
 			};
 
-			// Most callers (Update, CycleToNextCamera, ManualSwitch, UpdateCameras) are
-			// already on the game thread. Calling InvokeBlocking from the game thread
-			// deadlocks or creates an ever-growing task queue because the action can't
-			// execute until the current tick returns — but we're blocking waiting for it.
-			// Only use InvokeBlocking for the one background-thread caller (ListenForClients).
-			if (_gameThreadId >= 0 && Thread.CurrentThread.ManagedThreadId == _gameThreadId)
-				sendGoto();
-			else
-				_torch.InvokeBlocking(sendGoto);
+			// Never call SendMessageTo inline — always defer to the next game tick.
+			// Steam P2P can stall when the target is unreachable, and calling it from
+			// inside CycleToNextCamera / UpdateCameras / ManualSwitch blocks the entire
+			// game thread mid-call-stack (the root cause of the server hangs visible
+			// in the Windows Wait Chain as "waiting to finish network I/O").
+			_pendingGotoActions.Enqueue(sendGoto);
 		}
 
 		/// <summary>

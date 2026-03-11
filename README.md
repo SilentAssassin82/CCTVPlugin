@@ -283,6 +283,9 @@ Set `SpectatorSteamId` to the Steam ID of the fake client account. Ensure the cl
 **CCTVCapture.exe not connecting**
 Confirm the port matches the plugin config and no firewall is blocking it. For multi-client setups pass `--port XXXX` to each `CCTVCapture.exe` instance.
 
+**Server hangs / sim-speed drops when running alongside Isy's Inventory Manager**
+Isy's Inventory Manager performs heavy grid-wide inventory scans via a Programmable Block script. On servers with many grids these scans can stall the game thread for 50–100ms+, which may cause intermittent freezes that appear to coincide with CCTV camera switches. The CCTV plugin itself is not the cause — its per-tick cost is typically 2–6ms — but the two workloads can collide. If you experience periodic hangs, try disabling Isy's script temporarily to confirm. A fix or workaround is being investigated.
+
 ---
 
 ## Changelog

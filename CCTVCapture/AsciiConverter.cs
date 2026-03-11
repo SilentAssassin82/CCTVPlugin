@@ -65,7 +65,54 @@ namespace CCTVCapture
         [ThreadStatic]
         private static float[] _bChannelBuf;
 
-        // Bayer dither amplitude for the colour path (0 = no dither, 1 = full ±0.5-step range).
+        // Per-thread reusable grayscale buffer for Floyd-Steinberg dithering (grayscale path).
+        // Replaces the per-frame float[,] allocation that landed on the LOH every frame.
+        [ThreadStatic]
+        private static float[] _grayBuf;
+
+        // Per-thread reusable pixel buffer for LockBits reads.
+        // Avoids allocating a new byte[] (up to ~400 KB for 362×362) every frame.
+        [ThreadStatic]
+        private static byte[] _pixelBuf;
+
+        // Per-thread reusable StringBuilder for ASCII/color output.
+        // Avoids a new ~260 KB StringBuilder backing array per frame.
+        [ThreadStatic]
+        private static StringBuilder _sbBuf;
+
+        // Per-thread reusable MemoryStream for GZip compression.
+        // Avoids per-frame MemoryStream + internal byte[] allocations on the LOH.
+        [ThreadStatic]
+        private static MemoryStream _compressMs;
+
+        // Per-thread reusable byte[] for UTF-8 encoding in CompressAscii.
+        // The 0xE100 color chars are 3 bytes each in UTF-8, so 362×362 ≈ 393 KB.
+        [ThreadStatic]
+        private static byte[] _utf8Buf;
+
+        /// <summary>
+        /// Returns (and possibly grows) the per-thread pixel buffer.
+        /// </summary>
+        private static byte[] RentPixelBuf(int minSize)
+        {
+            if (_pixelBuf == null || _pixelBuf.Length < minSize)
+                _pixelBuf = new byte[minSize];
+            return _pixelBuf;
+        }
+
+        /// <summary>
+        /// Returns (and possibly grows) the per-thread StringBuilder, cleared to empty.
+        /// </summary>
+        private static StringBuilder RentStringBuilder(int capacity)
+        {
+            if (_sbBuf == null || _sbBuf.Capacity < capacity)
+                _sbBuf = new StringBuilder(capacity);
+            else
+                _sbBuf.Clear();
+            return _sbBuf;
+        }
+
+        // Bayer dither amplitude for the colour path
         // Values below 1.0 compress the threshold range toward 0.5, so only pixels whose
         // channel value is within (SCALE × 0.5) of a quantisation boundary get dithered.
         // This reduces the visible 4×4 halftone pattern on smooth near-neutral areas
@@ -342,15 +389,14 @@ namespace CCTVCapture
                 PixelFormat.Format24bppRgb);
 
             int stride = bmpData.Stride;
-            IntPtr scan0 = bmpData.Scan0;
             int byteCount = stride * targetHeight;
-            byte[] pixels = new byte[byteCount];
-            Marshal.Copy(scan0, pixels, 0, byteCount);
+            byte[] pixels = RentPixelBuf(byteCount);
+            Marshal.Copy(bmpData.Scan0, pixels, 0, byteCount);
 
             resized.UnlockBits(bmpData);
 
             // Convert to color characters with contrast boost
-            StringBuilder result = new StringBuilder((targetWidth + 1) * targetHeight);
+            StringBuilder result = RentStringBuilder((targetWidth + 1) * targetHeight);
 
             for (int y = 0; y < targetHeight; y++)
             {
@@ -398,8 +444,9 @@ namespace CCTVCapture
                 PixelFormat.Format24bppRgb);
 
             int stride = bmpData.Stride;
-            byte[] pixels = new byte[stride * targetHeight];
-            Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            int pixelBytes = stride * targetHeight;
+            byte[] pixels = RentPixelBuf(pixelBytes);
+            Marshal.Copy(bmpData.Scan0, pixels, 0, pixelBytes);
             resized.UnlockBits(bmpData);
             resized.Dispose();
 
@@ -503,7 +550,7 @@ namespace CCTVCapture
             }
 
             // Convert dithered RGB values to SE color characters
-            StringBuilder result = new StringBuilder((targetWidth + 1) * targetHeight);
+            StringBuilder result = RentStringBuilder((targetWidth + 1) * targetHeight);
 
             for (int y = 0; y < targetHeight; y++)
             {
@@ -554,12 +601,13 @@ namespace CCTVCapture
                 PixelFormat.Format24bppRgb);
 
             int stride = bmpData.Stride;
-            byte[] pixels = new byte[stride * targetHeight];
-            Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            int pixelBytes = stride * targetHeight;
+            byte[] pixels = RentPixelBuf(pixelBytes);
+            Marshal.Copy(bmpData.Scan0, pixels, 0, pixelBytes);
             resized.UnlockBits(bmpData);
             resized.Dispose();
 
-            StringBuilder result = new StringBuilder((targetWidth + 1) * targetHeight);
+            StringBuilder result = RentStringBuilder((targetWidth + 1) * targetHeight);
 
             for (int y = 0; y < targetHeight; y++)
             {
@@ -641,10 +689,9 @@ namespace CCTVCapture
                 PixelFormat.Format24bppRgb);
 
             int stride = bmpData.Stride;
-            IntPtr scan0 = bmpData.Scan0;
             int byteCount = stride * adjustedHeight;
-            byte[] pixels = new byte[byteCount];
-            Marshal.Copy(scan0, pixels, 0, byteCount);
+            byte[] pixels = RentPixelBuf(byteCount);
+            Marshal.Copy(bmpData.Scan0, pixels, 0, byteCount);
 
             resized.UnlockBits(bmpData);
 
@@ -660,7 +707,7 @@ namespace CCTVCapture
             }
 
             // Convert to ASCII with contrast boost
-            StringBuilder result = new StringBuilder((targetWidth + 1) * adjustedHeight);
+            StringBuilder result = RentStringBuilder((targetWidth + 1) * adjustedHeight);
 
             for (int y = 0; y < adjustedHeight; y++)
             {
@@ -789,75 +836,89 @@ namespace CCTVCapture
                 PixelFormat.Format24bppRgb);
 
             int stride = bmpData.Stride;
-            byte[] pixels = new byte[stride * adjustedHeight];
-            Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            int pixelBytes = stride * adjustedHeight;
+            byte[] pixels = RentPixelBuf(pixelBytes);
+            Marshal.Copy(bmpData.Scan0, pixels, 0, pixelBytes);
 
             resized.UnlockBits(bmpData);
             resized.Dispose();
 
+            // Reuse per-thread flat float[] buffer instead of allocating float[,] every frame.
+            // Layout: row-major [y * targetWidth + x] — same pattern as the color dithered path.
+            int total = targetWidth * adjustedHeight;
+            if (_grayBuf == null || _grayBuf.Length < total)
+                _grayBuf = new float[total];
+            else
+                Array.Clear(_grayBuf, 0, total);
+            float[] grayscale = _grayBuf;
+
             // Convert to grayscale with contrast
-            float[,] grayscale = new float[targetWidth, adjustedHeight];
             for (int y = 0; y < adjustedHeight; y++)
             {
                 int rowOffset = y * stride;
+                int rowBase = y * targetWidth;
                 for (int x = 0; x < targetWidth; x++)
                 {
                     int idx = rowOffset + x * 3;
                     float lum = (pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f) / 255f;
                     lum = (float)Math.Pow(lum, GRAYSCALE_GAMMA); // Shadow lift — see GRAYSCALE_GAMMA
                     lum = (lum - CONTRAST_MIDPOINT) * CONTRAST + CONTRAST_MIDPOINT;
-                    grayscale[x, y] = lum < 0f ? 0f : (lum > 1f ? 1f : lum);
+                    grayscale[rowBase + x] = lum < 0f ? 0f : (lum > 1f ? 1f : lum);
                 }
             }
 
             // Apply Floyd-Steinberg dithering
             for (int y = 0; y < adjustedHeight; y++)
             {
+                int rowBase = y * targetWidth;
+                int nextRowBase = rowBase + targetWidth;
                 for (int x = 0; x < targetWidth; x++)
                 {
-                    float oldPixel = grayscale[x, y];
+                    int i = rowBase + x;
+                    float oldPixel = grayscale[i];
 
                     // BLOCK_RAMP avoids the tartan artefact; dithering spreads quantisation error
                     // across cells, compensating for the fewer gradation levels.
                     int levels = BLOCK_RAMP.Length;
                     float newPixel = (float)Math.Round(oldPixel * (levels - 1)) / (levels - 1);
-                    grayscale[x, y] = newPixel;
+                    grayscale[i] = newPixel;
 
                     float error = oldPixel - newPixel;
 
                     // Distribute error to neighboring pixels
                     if (x + 1 < targetWidth)
-                        grayscale[x + 1, y] += error * 7f / 16f;
+                        grayscale[i + 1] += error * 7f / 16f;
 
                     if (y + 1 < adjustedHeight)
                     {
                         if (x > 0)
-                            grayscale[x - 1, y + 1] += error * 3f / 16f;
+                            grayscale[nextRowBase + x - 1] += error * 3f / 16f;
 
-                        grayscale[x, y + 1] += error * 5f / 16f;
+                        grayscale[nextRowBase + x] += error * 5f / 16f;
 
                         if (x + 1 < targetWidth)
-                            grayscale[x + 1, y + 1] += error * 1f / 16f;
+                            grayscale[nextRowBase + x + 1] += error * 1f / 16f;
                     }
 
                     // Clamp values
-                    grayscale[x, y] = Math.Max(0, Math.Min(1, grayscale[x, y]));
+                    grayscale[i] = Math.Max(0, Math.Min(1, grayscale[i]));
                 }
             }
 
             // Convert to ASCII
-                StringBuilder result = new StringBuilder(targetWidth * adjustedHeight + adjustedHeight);
+            StringBuilder result = RentStringBuilder(targetWidth * adjustedHeight + adjustedHeight);
 
-                for (int y = 0; y < adjustedHeight; y++)
+            for (int y = 0; y < adjustedHeight; y++)
+            {
+                int rowBase = y * targetWidth;
+                for (int x = 0; x < targetWidth; x++)
                 {
-                    for (int x = 0; x < targetWidth; x++)
-                    {
-                        float brightness = grayscale[x, y];
-                        int charIndex = (int)(brightness * (BLOCK_RAMP.Length - 1) + 0.5f);
-                        charIndex = Math.Max(0, Math.Min(BLOCK_RAMP.Length - 1, charIndex));
+                    float brightness = grayscale[rowBase + x];
+                    int charIndex = (int)(brightness * (BLOCK_RAMP.Length - 1) + 0.5f);
+                    charIndex = Math.Max(0, Math.Min(BLOCK_RAMP.Length - 1, charIndex));
 
-                        result.Append(BLOCK_RAMP[charIndex]);
-                    }
+                    result.Append(BLOCK_RAMP[charIndex]);
+                }
 
                 if (y < adjustedHeight - 1)
                     result.Append('\n');
@@ -898,8 +959,9 @@ namespace CCTVCapture
                 PixelFormat.Format24bppRgb);
 
             int stride = bmpData.Stride;
-            byte[] pixels = new byte[stride * adjustedHeight];
-            Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            int pixelBytes = stride * adjustedHeight;
+            byte[] pixels = RentPixelBuf(pixelBytes);
+            Marshal.Copy(bmpData.Scan0, pixels, 0, pixelBytes);
             resized.UnlockBits(bmpData);
             resized.Dispose();
 
@@ -917,7 +979,7 @@ namespace CCTVCapture
             int   rampLen   = WHIP_RAMP.Length; // 8
             float rampScale = rampLen - 1;        // 7.0f  (one quantisation step = ~0.143)
 
-            StringBuilder result = new StringBuilder((targetWidth + 1) * adjustedHeight);
+            StringBuilder result = RentStringBuilder((targetWidth + 1) * adjustedHeight);
 
             for (int y = 0; y < adjustedHeight; y++)
             {
@@ -951,18 +1013,29 @@ namespace CCTVCapture
         /// <summary>
         /// GZip-compresses ASCII art and encodes as base64 for compact transmission.
         /// Receiver must detect the GZ mode suffix and decompress accordingly.
+        /// Reuses per-thread MemoryStream and UTF-8 byte buffer to avoid LOH allocations.
         /// </summary>
         public static string CompressAscii(string ascii)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(ascii);
-            using (var ms = new MemoryStream())
+            // Reuse UTF-8 byte buffer — color chars (0xE100) are 3 bytes each in UTF-8
+            int maxBytes = Encoding.UTF8.GetMaxByteCount(ascii.Length);
+            if (_utf8Buf == null || _utf8Buf.Length < maxBytes)
+                _utf8Buf = new byte[maxBytes];
+            int byteCount = Encoding.UTF8.GetBytes(ascii, 0, ascii.Length, _utf8Buf, 0);
+
+            // Reuse MemoryStream — SetLength(0) resets position without releasing buffer
+            if (_compressMs == null)
+                _compressMs = new MemoryStream(maxBytes);
+            else
+                _compressMs.SetLength(0);
+
+            using (var gz = new GZipStream(_compressMs, CompressionLevel.Fastest, leaveOpen: true))
             {
-                using (var gz = new GZipStream(ms, CompressionLevel.Fastest))
-                {
-                    gz.Write(bytes, 0, bytes.Length);
-                }
-                return Convert.ToBase64String(ms.ToArray());
+                gz.Write(_utf8Buf, 0, byteCount);
             }
+
+            // Use GetBuffer() + length to avoid the ToArray() copy
+            return Convert.ToBase64String(_compressMs.GetBuffer(), 0, (int)_compressMs.Length);
         }
 
         /// <summary>
