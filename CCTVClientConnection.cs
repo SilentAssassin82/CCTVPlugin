@@ -127,6 +127,16 @@ namespace CCTVPlugin
 		private int _proximityCheckTicks = 0;
 		private const int PROXIMITY_CHECK_INTERVAL = 300; // ticks between checks (~5 s at 60 TPS)
 
+		// Cockpit-aware LCD throttle: when a player enters a cockpit on the SAME grid
+		// as a CCTV LCD (dynamic grids only), SE's renderer rebuilds LCD textures
+		// synchronously during the seat transition — stalling the game thread.
+		// We pause LCD writes for a short spool-up period after cockpit entry so
+		// SE can finish the transition animation without competing with WriteText calls.
+		private bool _playerInCockpitOnLcdGrid = false;
+		private bool _wasPlayerInCockpitOnLcdGrid = false;
+		private int _cockpitSpoolUpTicksRemaining = 0;
+		private const int COCKPIT_SPOOL_UP_TICKS = 120; // ~2 seconds at 60 TPS
+
 		// Display FPS throttling: single and grid writes are staggered onto
 		// separate ticks so they never coincide, halving per-tick LCD work.
 		private int _singleDisplayTicks = 0;
@@ -1133,7 +1143,16 @@ namespace CCTVPlugin
 			bool gridTick = (++_gridDisplayTicks >= _displayFpsInterval);
 			if (gridTick) _gridDisplayTicks = 0;
 
-			if (_anyPlayerNearby)
+			// Cockpit spool-up gate: when a player just entered a cockpit on the
+			// same dynamic grid as CCTV LCDs, pause writes for a short period so
+			// SE's renderer can finish the seat transition without competing with
+			// WriteText texture rebuilds (the root cause of the cockpit-entry hang).
+			if (_cockpitSpoolUpTicksRemaining > 0)
+				_cockpitSpoolUpTicksRemaining--;
+
+			bool writesAllowed = _anyPlayerNearby && _cockpitSpoolUpTicksRemaining == 0;
+
+			if (writesAllowed)
 			{
 				if (singleTick && _hasPendingSingleFrame)
 				{
@@ -1300,11 +1319,12 @@ namespace CCTVPlugin
 				Log.Debug($"[{Name}] 🖥️ Writing {width}×{height} frame (BaseName: '{baseName}', Prefix: '{_config.LcdPrefix}')");
 
 				if (width == _sharedConfig.LcdSingleResolution && height == _sharedConfig.LcdSingleResolution)
-				{
-					string singleLcdName = $"{_config.LcdPrefix} {baseName}";
-					WriteSingleLCD(singleLcdName, content, isColor);
-					CopyToSlaveLCDs(_config.LcdPrefix, baseName);
-				}
+					{
+						string singleLcdName = $"{_config.LcdPrefix} {baseName}";
+						string shifted = ApplyContentShift(content, _sharedConfig.SingleContentShift);
+						WriteSingleLCD(singleLcdName, shifted, isColor);
+						CopyToSlaveLCDs(_config.LcdPrefix, baseName);
+					}
 				else if (width == _sharedConfig.LcdGridResolution && height == _sharedConfig.LcdGridResolution)
 				{
 					WriteGridLCDs(_config.LcdPrefix, baseName, content, isColor, width, height);
@@ -1460,8 +1480,15 @@ namespace CCTVPlugin
 
 			// GridHorizontalOffset: same principle for the vertical seam.
 			int hOffset = _sharedConfig.GridHorizontalOffset;
-			int tlStartX = Math.Max(0, Math.Min(hOffset, quadW - 1));
-			int trStartX = Math.Max(0, quadW - hOffset);
+
+			// GridContentShift: uniform horizontal shift applied to ALL quadrants.
+			// Positive = image moves left on LCDs (compensates for SE's built-in
+			// left padding). Physically slides the extraction window right so more
+			// of the left edge is visible and the right edge is cropped slightly.
+			int shift = _sharedConfig.GridContentShift;
+
+			int tlStartX = Math.Max(0, Math.Min(hOffset, quadW - 1) + shift);
+			int trStartX = Math.Max(0, quadW - hOffset + shift);
 
 			if (vOffset != 0 || hOffset != 0)
 				Log.Debug($"[{Name}] GridOffset: v={vOffset} h={hOffset}, tlStartY={tlStartY}, blStartY={blStartY}, tlStartX={tlStartX}, trStartX={trStartX}");
@@ -1534,6 +1561,48 @@ namespace CCTVPlugin
 				Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {result.Length} chars (expected ~{width * height + height - 1})");
 
 			return result;
+		}
+
+		/// <summary>
+		/// Applies a uniform horizontal content shift to every line in a frame string.
+		/// Positive shift trims N chars from the left of each line (image moves left on LCD).
+		/// Negative shift prepends N spaces to each line (image moves right on LCD).
+		/// Returns the original string unchanged when shift is 0.
+		/// </summary>
+		private static string ApplyContentShift(string content, int shift)
+		{
+			if (shift == 0 || string.IsNullOrEmpty(content))
+				return content;
+
+			var sb = new StringBuilder(content.Length);
+			int i = 0;
+			while (i < content.Length)
+			{
+				// Find end of current line
+				int nl = content.IndexOf('\n', i);
+				int lineEnd = (nl >= 0) ? nl : content.Length;
+				int lineLen = lineEnd - i;
+
+				if (shift > 0)
+				{
+					// Trim from left: skip 'shift' chars
+					int skip = Math.Min(shift, lineLen);
+					sb.Append(content, i + skip, lineLen - skip);
+				}
+				else
+				{
+					// Pad left: prepend spaces
+					sb.Append(' ', -shift);
+					sb.Append(content, i, lineLen);
+				}
+
+				if (nl >= 0)
+					sb.Append('\n');
+
+				i = lineEnd + 1;
+			}
+
+			return sb.ToString();
 		}
 
 		/// <summary>
@@ -2003,7 +2072,9 @@ namespace CCTVPlugin
 		/// <summary>
 		/// Checks whether any live player is within ProximityCheckRadius metres of any LCD
 		/// belonging to this connection (masters and slaves included).
-		/// Updates _anyPlayerNearby and logs a single INFO line when the state changes.
+		/// Also detects whether any nearby player is seated in a cockpit on the same
+		/// grid as a CCTV LCD (dynamic grids only) — used to trigger the spool-up pause.
+		/// Updates _anyPlayerNearby / _playerInCockpitOnLcdGrid and logs state changes.
 		/// Must be called from the game thread.
 		/// </summary>
 		private void CheckPlayerProximity()
@@ -2012,6 +2083,7 @@ namespace CCTVPlugin
 			if (radius <= 0f)
 			{
 				_anyPlayerNearby = true;
+				_playerInCockpitOnLcdGrid = false;
 				return;
 			}
 
@@ -2021,6 +2093,9 @@ namespace CCTVPlugin
 			string lcdPrefix = $"{_config.LcdPrefix} {baseName}";
 
 			var lcdPositions = new List<Vector3D>();
+			// Collect grid EntityIds that contain CCTV LCDs on dynamic (non-static) grids.
+			// Used below to detect cockpit-on-same-grid situations.
+			var lcdDynamicGridIds = new HashSet<long>();
 			try
 			{
 				MyAPIGateway.Entities.GetEntities(null, entity =>
@@ -2033,7 +2108,11 @@ namespace CCTVPlugin
 						{
 							var lcd = block as IMyTextPanel;
 							if (lcd != null && (lcd.CustomName ?? "").StartsWith(lcdPrefix, StringComparison.OrdinalIgnoreCase))
+							{
 								lcdPositions.Add(lcd.WorldMatrix.Translation);
+								if (!grid.IsStatic)
+									lcdDynamicGridIds.Add(grid.EntityId);
+							}
 						}
 					}
 					catch (InvalidOperationException) { } // grid blocks changed mid-iteration
@@ -2046,6 +2125,7 @@ namespace CCTVPlugin
 			{
 				// No LCD found yet — stay active so writes begin as soon as one appears
 				_anyPlayerNearby = true;
+				_playerInCockpitOnLcdGrid = false;
 				return;
 			}
 
@@ -2053,13 +2133,50 @@ namespace CCTVPlugin
 			var players = new List<IMyPlayer>();
 			MyAPIGateway.Players.GetPlayers(players);
 
-			_anyPlayerNearby = players.Any(p =>
+			bool foundNearby = false;
+			bool foundInCockpit = false;
+
+			foreach (var p in players)
 			{
 				var character = p.Character;
-				if (character == null || character.IsDead) return false;
+				if (character == null || character.IsDead) continue;
 				Vector3D charPos = character.WorldMatrix.Translation;
-				return lcdPositions.Any(pos => Vector3D.DistanceSquared(charPos, pos) <= radiusSq);
-			});
+
+				bool isNear = lcdPositions.Any(pos => Vector3D.DistanceSquared(charPos, pos) <= radiusSq);
+				if (isNear)
+					foundNearby = true;
+
+				// Check if this player is seated in a cockpit on a dynamic grid that has CCTV LCDs.
+				// ControlledEntity is the cockpit/seat block when the player is seated.
+				if (!foundInCockpit && lcdDynamicGridIds.Count > 0)
+				{
+					try
+					{
+						var controlled = p.Controller?.ControlledEntity as IMyCubeBlock;
+						if (controlled != null && controlled.CubeGrid != null)
+						{
+							if (lcdDynamicGridIds.Contains(controlled.CubeGrid.EntityId))
+								foundInCockpit = true;
+						}
+					}
+					catch { } // entity may be orphaned mid-check
+				}
+			}
+
+			_anyPlayerNearby = foundNearby;
+
+			// Detect cockpit entry → trigger spool-up pause
+			if (foundInCockpit && !_playerInCockpitOnLcdGrid)
+			{
+				_cockpitSpoolUpTicksRemaining = COCKPIT_SPOOL_UP_TICKS;
+				Log.Info($"[{Name}] 🪑 Player entered cockpit on CCTV LCD grid — pausing writes for {COCKPIT_SPOOL_UP_TICKS / 60f:F1}s spool-up");
+			}
+			else if (!foundInCockpit && _playerInCockpitOnLcdGrid)
+			{
+				Log.Info($"[{Name}] 🪑 Player left cockpit on CCTV LCD grid — resuming normal writes");
+				_cockpitSpoolUpTicksRemaining = 0;
+			}
+			_playerInCockpitOnLcdGrid = foundInCockpit;
 
 			if (_anyPlayerNearby != _wasPlayerNearby)
 			{

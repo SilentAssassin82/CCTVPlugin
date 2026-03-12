@@ -34,9 +34,11 @@ namespace CCTVPlugin
         private string _gridPostProcessMode = "None";
         private bool _enableVerboseFrameLogging = false;
         private float _gridFontSize = 0.1f;
+        private int _gridContentShift = 0;
         private int _gridVerticalOffset = 5;   // default overlap to close vertical seam
         private int _gridHorizontalOffset = 0;
         private float _singleLcdFontSize = 0.080f;
+        private int _singleContentShift = 0;
         private float _proximityCheckRadius = 150f;
         private int _lcdGridResolution = 362;
         private bool _desaturateColorMode = false;
@@ -217,13 +219,10 @@ namespace CCTVPlugin
             set
             {
                 _useColorMode = value;
-                // Sync per-mode font defaults so each display type fills its panel correctly.
-                _singleLcdFontSize  = value ? 0.1f   : 0.080f;
                 // Setting GridFontSize (via property) auto-calculates LcdGridResolution
-                // so each panel is exactly filled at the chosen font.
+                // and syncs SingleLcdFontSize so both display types match.
                 GridFontSize = value ? 0.1f : 0.075f;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(SingleLcdFontSize));
             }
         }
 
@@ -370,6 +369,23 @@ namespace CCTVPlugin
         }
 
         /// <summary>
+        /// Horizontal content shift for the 2×2 grid panels (in characters).
+        /// Moves the extraction window uniformly across all four quadrants.
+        /// Positive values shift the image RIGHT on the LCDs. Negative values shift it LEFT.
+        /// Range: −20 to +20 chars. Default: 0.
+        /// </summary>
+        [XmlElement("GridContentShift")]
+        public int GridContentShift
+        {
+            get => _gridContentShift;
+            set
+            {
+                _gridContentShift = Math.Max(-20, Math.Min(20, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
         /// Vertical row offset for the 2×2 grid bottom panels (BL/BR).
         /// Positive values shift the bottom panels' start UP (overlap with top panels),
         /// negative values shift them DOWN. Closes or widens the vertical seam.
@@ -421,6 +437,23 @@ namespace CCTVPlugin
         }
 
         /// <summary>
+        /// Horizontal content shift for single LCD panels (in characters).
+        /// Independent of GridContentShift so each display type can be centred separately.
+        /// Positive values shift the image RIGHT. Negative values shift it LEFT.
+        /// Range: −20 to +20 chars. Default: 0.
+        /// </summary>
+        [XmlElement("SingleContentShift")]
+        public int SingleContentShift
+        {
+            get => _singleContentShift;
+            set
+            {
+                _singleContentShift = Math.Max(-20, Math.Min(20, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
         /// Output render resolution for the 2×2 LCD grid (width and height in characters).
         /// Must be an even number between 64 and 700. The single-LCD resolution is always half of this value.
         /// Auto-calculated from GridFontSize so the content exactly fills each panel.
@@ -436,6 +469,24 @@ namespace CCTVPlugin
                 _lcdGridResolution = (clamped % 2 != 0) ? clamped - 1 : clamped;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(LcdSingleResolution));
+
+                // Reverse-sync: recalculate GridFontSize so the content exactly fills
+                // each panel at this resolution.  SingleLcdFontSize is kept in lockstep
+                // so both display types use the same font and the content shift sliders
+                // work consistently across grid and single panels.
+                int charsPerPanel = _lcdGridResolution / 2;
+                float autoFont = FONT_RESOLUTION_CONSTANT / charsPerPanel;
+                autoFont = Math.Max(0.05f, Math.Min(0.2f, autoFont));
+                if (Math.Abs(_gridFontSize - autoFont) > 0.001f)
+                {
+                    _gridFontSize = autoFont;
+                    OnPropertyChanged(nameof(GridFontSize));
+                }
+                if (Math.Abs(_singleLcdFontSize - autoFont) > 0.001f)
+                {
+                    _singleLcdFontSize = autoFont;
+                    OnPropertyChanged(nameof(SingleLcdFontSize));
+                }
 
                 // Keep capture resolution in sync — they must always match
                 if (_captureWidth != _lcdGridResolution)

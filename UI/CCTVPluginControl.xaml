@@ -116,6 +116,13 @@
                 <TextBlock Text="  (auto-fits resolution to fill panel)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Grid Content Shift:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="-20" Maximum="20" Value="{Binding GridContentShift}" 
+                        TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding GridContentShift, StringFormat={}{0} chars}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (+ shifts image right, − shifts left)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Grid Vertical Offset:" Width="160" VerticalAlignment="Center"/>
                 <Slider Width="150" Minimum="-30" Maximum="30" Value="{Binding GridVerticalOffset}" 
                         TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
@@ -135,6 +142,13 @@
                         TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding SingleLcdFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (single panel alignment)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Single Content Shift:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="-20" Maximum="20" Value="{Binding SingleContentShift}" 
+                        TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding SingleContentShift, StringFormat={}{0} chars}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (+ shifts image right, − shifts left)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <Separator Margin="0,10"/>
 
