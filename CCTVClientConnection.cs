@@ -137,6 +137,13 @@ namespace CCTVPlugin
 		private int _cockpitSpoolUpTicksRemaining = 0;
 		private const int COCKPIT_SPOOL_UP_TICKS = 120; // ~2 seconds at 60 TPS
 
+		// Cached cockpit blocks on dynamic grids that have CCTV LCDs (or are
+		// mechanically connected to one).  Discovered from the grids already in
+		// _lcdCache — NO MyEntities.GetEntities() scan required.
+		// On each 5-second proximity check we just call .Pilot on these (O(few)).
+		private List<Sandbox.Game.Entities.MyCockpit> _cockpitCache;
+		private bool _cockpitCacheDirty = true;
+
 		// Display FPS throttling: single and grid writes are staggered onto
 		// separate ticks so they never coincide, halving per-tick LCD work.
 		private int _singleDisplayTicks = 0;
@@ -178,6 +185,18 @@ namespace CCTVPlugin
 		// Only accessed from the game thread so no synchronisation needed.
 		private int[] _lineStarts;
 		private int[] _lineLengths;
+
+		// Reusable buffers for frame decompression (listener thread).
+		// Avoids per-frame LOH allocations for MemoryStream internal byte[] (~120-320 KB)
+		// and the base64 char[] copy buffer.
+		private MemoryStream _decompressMs;
+		private char[] _base64CharBuf;
+
+		// Reusable StringBuilders for game-thread frame processing.
+		// Avoids 4-8 StringBuilder + backing-array allocations per display tick.
+		private StringBuilder _quadrantSb;
+		private StringBuilder _shiftSb;
+		private StringBuilder _heatmapSb;
 
 		// Connection state
 		public bool IsConnected => _client != null && _client.Connected;
@@ -885,27 +904,39 @@ namespace CCTVPlugin
 						int dataStartIndex = message.IndexOf(mode) + mode.Length + 1;
 						if (dataStartIndex < message.Length)
 						{
-							string base64Data = message.Substring(dataStartIndex);
+							// Decode base64 WITHOUT creating a Substring (which can be
+							// 40-120 KB and land on the LOH).  Copy the chars into a
+							// reusable buffer and use FromBase64CharArray instead.
+							int base64Len = message.Length - dataStartIndex;
 
-							Log.Debug($"[{Name}] 🔍 FRAME parsing: {width}×{height} {mode}, base64 length: {base64Data.Length}");
+							if (Log.IsDebugEnabled)
+								Log.Debug($"[{Name}] 🔍 FRAME parsing: {width}×{height} {mode}, base64 length: {base64Len}");
 
 							// Decode on background thread
 							try
 							{
-								byte[] bytes = Convert.FromBase64String(base64Data);
+								if (_base64CharBuf == null || _base64CharBuf.Length < base64Len)
+									_base64CharBuf = new char[base64Len];
+								message.CopyTo(dataStartIndex, _base64CharBuf, 0, base64Len);
+								byte[] bytes = Convert.FromBase64CharArray(_base64CharBuf, 0, base64Len);
 								string decodedContent;
 
 								if (mode.EndsWith("GZ"))
-								{
-									using (var ms = new MemoryStream(bytes))
-									using (var gz = new GZipStream(ms, CompressionMode.Decompress))
-									// Pre-allocate ~4× the compressed size to avoid repeated doublings.
-									// GetBuffer() is used below to skip the extra ToArray() copy.
-									using (var outMs = new MemoryStream(bytes.Length * 4))
 									{
-										gz.CopyTo(outMs);
-										decodedContent = Encoding.UTF8.GetString(outMs.GetBuffer(), 0, (int)outMs.Length);
-									}
+										// Reuse decompression MemoryStream — SetLength(0) resets
+										// position without releasing the internal byte[], avoiding
+										// a ~120-320 KB LOH allocation every frame.
+										if (_decompressMs == null)
+											_decompressMs = new MemoryStream(bytes.Length * 4);
+										else
+											_decompressMs.SetLength(0);
+
+										using (var ms = new MemoryStream(bytes))
+										using (var gz = new GZipStream(ms, CompressionMode.Decompress))
+										{
+											gz.CopyTo(_decompressMs);
+											decodedContent = Encoding.UTF8.GetString(_decompressMs.GetBuffer(), 0, (int)_decompressMs.Length);
+										}
 								}
 								else
 								{
@@ -1036,6 +1067,7 @@ namespace CCTVPlugin
 					$"cycle {_cameraCycleTicks}/{_dynamicCycleIntervalTicks}t, " +
 					$"manual={_isManualMode}, autoCycle={_sharedConfig.EnableAutoCameraCycling}, " +
 					$"queue={queueCount}, preTP={_preTeleportSent}, nearby={_anyPlayerNearby}, " +
+					$"cockpit={_playerInCockpitOnLcdGrid}, spool={_cockpitSpoolUpTicksRemaining}, " +
 					$"rx={rxSnap}, lcdW={wSingle}+{wGrid}, miss={miss}, eFail={eFail}, " +
 					$"perf: worst={_worstTickMs:F1}ms write={_worstWriteMs:F1}ms prox={_worstProximityMs:F1}ms slow={_slowTickCount}");
 				_worstTickMs = 0; _worstWriteMs = 0; _worstProximityMs = 0; _slowTickCount = 0;
@@ -1143,14 +1175,13 @@ namespace CCTVPlugin
 			bool gridTick = (++_gridDisplayTicks >= _displayFpsInterval);
 			if (gridTick) _gridDisplayTicks = 0;
 
-			// Cockpit spool-up gate: when a player just entered a cockpit on the
-			// same dynamic grid as CCTV LCDs, pause writes for a short period so
-			// SE's renderer can finish the seat transition without competing with
-			// WriteText texture rebuilds (the root cause of the cockpit-entry hang).
+			// Cockpit spool-up countdown (tick-down only; the gate itself is
+			// applied per-LCD in WriteLCDContent so only dynamic-grid LCDs
+			// pause — static-grid masters and slaves keep streaming).
 			if (_cockpitSpoolUpTicksRemaining > 0)
 				_cockpitSpoolUpTicksRemaining--;
 
-			bool writesAllowed = _anyPlayerNearby && _cockpitSpoolUpTicksRemaining == 0;
+			bool writesAllowed = _anyPlayerNearby;
 
 			if (writesAllowed)
 			{
@@ -1316,7 +1347,8 @@ namespace CCTVPlugin
 					return;
 				}
 
-				Log.Debug($"[{Name}] 🖥️ Writing {width}×{height} frame (BaseName: '{baseName}', Prefix: '{_config.LcdPrefix}')");
+				if (Log.IsDebugEnabled)
+					Log.Debug($"[{Name}] 🖥️ Writing {width}×{height} frame (BaseName: '{baseName}', Prefix: '{_config.LcdPrefix}')");
 
 				if (width == _sharedConfig.LcdSingleResolution && height == _sharedConfig.LcdSingleResolution)
 					{
@@ -1353,7 +1385,8 @@ namespace CCTVPlugin
 			if (lcd == null)
 			{
 				_lcdMisses++;
-				Log.Debug($"[{Name}] ⏭️ Skipping LCD '{lcdName}' - not present in world");
+				if (Log.IsDebugEnabled)
+					Log.Debug($"[{Name}] ⏭️ Skipping LCD '{lcdName}' - not present in world");
 				return;
 			}
 
@@ -1366,7 +1399,8 @@ namespace CCTVPlugin
 				if (IsTransparentLcd(lcd))
 				{
 					fontSize *= 1.12f;
-					Log.Debug($"[{Name}] 🔍 Transparent LCD detected for '{lcdName}', adjusted fontSize: {fontSize:F3}");
+					if (Log.IsDebugEnabled)
+						Log.Debug($"[{Name}] 🔍 Transparent LCD detected for '{lcdName}', adjusted fontSize: {fontSize:F3}");
 				}
 			}
 			else
@@ -1374,7 +1408,8 @@ namespace CCTVPlugin
 				fontSize = CalculateAutoFontSize(isColor);
 			}
 
-			Log.Debug($"[{Name}] ✅ Writing to single LCD '{lcdName}' ({content.Length} chars, color: {isColor}, fontSize: {fontSize:F3})");
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] ✅ Writing to single LCD '{lcdName}' ({content.Length} chars, color: {isColor}, fontSize: {fontSize:F3})");
 			WriteLCDContent(lcd, content, fontSize, isColor);
 			_lcdWritesSingle++;
 		}
@@ -1424,46 +1459,52 @@ namespace CCTVPlugin
 		/// </summary>
 		private void WriteGridLCDs(string lcdPrefix, string baseName, string content, bool isColor, int width, int height)
 		{
-			Log.Debug($"[{Name}] 📐 Writing 2×2 grid (Prefix: '{lcdPrefix}', Base: '{baseName}')");
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] 📐 Writing 2×2 grid (Prefix: '{lcdPrefix}', Base: '{baseName}')");
 
 			int quadW = width / 2;
 			int quadH = height / 2;
 
-			// Index-based line scanning — avoids content.Split('\n') which creates
-			// 362+ new strings (~256 KB) on the game thread every grid write.
-			// Instead we record start-index and length of each line directly
-			// into reusable int[] buffers (< 3 KB, SOH).
-			int lineCount = 1;
-			for (int i = 0; i < content.Length; i++)
-				if (content[i] == '\n') lineCount++;
-
-			if (lineCount < 4)
+			// Single-pass line scanning — counts lines AND fills offset buffers
+			// in one loop over the ~131 K content string (was two passes).
+			// Pre-allocate to height+1 which is the expected line count for a
+			// correctly-sized frame; the array grows only if the frame is larger.
+			int maxLines = height + 1;
+			if (_lineStarts == null || _lineStarts.Length < maxLines)
 			{
-				Log.Warn($"[{Name}] ⚠️ Grid content has {lineCount} lines, need at least 4");
-				return;
+				_lineStarts  = new int[maxLines];
+				_lineLengths = new int[maxLines];
 			}
 
-			// Grow reusable buffers only when needed — no per-frame allocation.
-			if (_lineStarts == null || _lineStarts.Length < lineCount)
-			{
-				_lineStarts  = new int[lineCount];
-				_lineLengths = new int[lineCount];
-			}
-
-			int li = 0;
+			int lineCount = 0;
 			int ls = 0;
 			for (int i = 0; i <= content.Length; i++)
 			{
 				if (i == content.Length || content[i] == '\n')
 				{
-					_lineStarts[li]  = ls;
-					_lineLengths[li] = i - ls;
-					li++;
-					ls = i + 1;
-				}
-			}
+					// Grow if frame has more lines than expected (defensive)
+					if (lineCount >= _lineStarts.Length)
+					{
+						int newLen = _lineStarts.Length * 2;
+						var ns = new int[newLen]; var nl2 = new int[newLen];
+						Array.Copy(_lineStarts, ns, lineCount);
+						Array.Copy(_lineLengths, nl2, lineCount);
+						_lineStarts = ns; _lineLengths = nl2;
+					}
+					_lineStarts[lineCount]  = ls;
+					_lineLengths[lineCount] = i - ls;
+						lineCount++;
+							ls = i + 1;
+						}
+					}
 
-			// Font size: grayscale chars are ~half the width of colour chars in SE Monospace,
+					if (lineCount < 4)
+					{
+						Log.Warn($"[{Name}] ⚠️ Grid content has {lineCount} lines, need at least 4");
+						return;
+					}
+
+					// Font size: grayscale chars are ~half the width of colour chars in SE Monospace,
 			// so grayscale uses 2× the base GridFontSize to fill each panel horizontally.
 			float gridFontSize = isColor
 				? _sharedConfig.GridFontSize
@@ -1490,7 +1531,7 @@ namespace CCTVPlugin
 			int tlStartX = Math.Max(0, Math.Min(hOffset, quadW - 1) + shift);
 			int trStartX = Math.Max(0, quadW - hOffset + shift);
 
-			if (vOffset != 0 || hOffset != 0)
+			if (Log.IsDebugEnabled && (vOffset != 0 || hOffset != 0))
 				Log.Debug($"[{Name}] GridOffset: v={vOffset} h={hOffset}, tlStartY={tlStartY}, blStartY={blStartY}, tlStartX={tlStartX}, trStartX={trStartX}");
 
 			string tlContent = ExtractQuadrant(content, lineCount, tlStartX, tlStartY, quadW, effectiveQuadH);
@@ -1505,16 +1546,20 @@ namespace CCTVPlugin
 			string blLcdName = $"{lcdPrefix} {baseName}_BL";
 			string brLcdName = $"{lcdPrefix} {baseName}_BR";
 
-			Log.Debug($"[{Name}] Writing TL quadrant to '{tlLcdName}' ({tlContent.Length} chars, font {gridFontSize:F3})");
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] Writing TL quadrant to '{tlLcdName}' ({tlContent.Length} chars, font {gridFontSize:F3})");
 			WriteSingleLCD(tlLcdName, tlContent, isColor, gridFontSize);
 
-			Log.Debug($"[{Name}] Writing TR quadrant to '{trLcdName}' ({trContent.Length} chars)");
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] Writing TR quadrant to '{trLcdName}' ({trContent.Length} chars)");
 			WriteSingleLCD(trLcdName, trContent, isColor, gridFontSize);
 
-			Log.Debug($"[{Name}] Writing BL quadrant to '{blLcdName}' ({blContent.Length} chars)");
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] Writing BL quadrant to '{blLcdName}' ({blContent.Length} chars)");
 			WriteSingleLCD(blLcdName, blContent, isColor, gridFontSize);
 
-			Log.Debug($"[{Name}] Writing BR quadrant to '{brLcdName}' ({brContent.Length} chars)");
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] Writing BR quadrant to '{brLcdName}' ({brContent.Length} chars)");
 			WriteSingleLCD(brLcdName, brContent, isColor, gridFontSize);
 
 			_lcdWritesGrid++;
@@ -1527,10 +1572,15 @@ namespace CCTVPlugin
 		/// Extract a quadrant from the full grid content using pre-computed line offsets.
 		/// Uses sb.Append(string, startIndex, count) to slice directly from the original
 		/// content string — avoids 181 Substring allocations per quadrant (~90 KB each).
+		/// Reuses _quadrantSb to avoid a new StringBuilder backing array per call.
 		/// </summary>
 		private string ExtractQuadrant(string content, int lineCount, int startX, int startY, int width, int height)
 		{
-			StringBuilder sb = new StringBuilder(width * height + height);
+			int needed = width * height + height;
+			if (_quadrantSb == null || _quadrantSb.Capacity < needed)
+				_quadrantSb = new StringBuilder(needed);
+			else
+				_quadrantSb.Clear();
 
 			for (int y = 0; y < height && (startY + y) < lineCount; y++)
 			{
@@ -1541,23 +1591,23 @@ namespace CCTVPlugin
 				if (startX < ll)
 				{
 					int sliceWidth = Math.Min(width, ll - startX);
-					sb.Append(content, ls + startX, sliceWidth);
+					_quadrantSb.Append(content, ls + startX, sliceWidth);
 
 					if (sliceWidth < width)
-						sb.Append(' ', width - sliceWidth);
+						_quadrantSb.Append(' ', width - sliceWidth);
 				}
 				else
 				{
-					sb.Append(' ', width);
+					_quadrantSb.Append(' ', width);
 				}
 
 				if (y < height - 1)
-					sb.Append('\n');
+					_quadrantSb.Append('\n');
 			}
 
-			string result = sb.ToString();
+			string result = _quadrantSb.ToString();
 
-			if (startX == 0 && startY == 0)
+			if (Log.IsDebugEnabled && startX == 0 && startY == 0)
 				Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {result.Length} chars (expected ~{width * height + height - 1})");
 
 			return result;
@@ -1569,12 +1619,16 @@ namespace CCTVPlugin
 		/// Negative shift prepends N spaces to each line (image moves right on LCD).
 		/// Returns the original string unchanged when shift is 0.
 		/// </summary>
-		private static string ApplyContentShift(string content, int shift)
+		private string ApplyContentShift(string content, int shift)
 		{
 			if (shift == 0 || string.IsNullOrEmpty(content))
 				return content;
 
-			var sb = new StringBuilder(content.Length);
+			if (_shiftSb == null || _shiftSb.Capacity < content.Length)
+				_shiftSb = new StringBuilder(content.Length);
+			else
+				_shiftSb.Clear();
+
 			int i = 0;
 			while (i < content.Length)
 			{
@@ -1587,22 +1641,22 @@ namespace CCTVPlugin
 				{
 					// Trim from left: skip 'shift' chars
 					int skip = Math.Min(shift, lineLen);
-					sb.Append(content, i + skip, lineLen - skip);
+					_shiftSb.Append(content, i + skip, lineLen - skip);
 				}
 				else
 				{
 					// Pad left: prepend spaces
-					sb.Append(' ', -shift);
-					sb.Append(content, i, lineLen);
+					_shiftSb.Append(' ', -shift);
+					_shiftSb.Append(content, i, lineLen);
 				}
 
 				if (nl >= 0)
-					sb.Append('\n');
+					_shiftSb.Append('\n');
 
 				i = lineEnd + 1;
 			}
 
-			return sb.ToString();
+			return _shiftSb.ToString();
 		}
 
 		/// <summary>
@@ -1705,7 +1759,8 @@ namespace CCTVPlugin
 			{
 				if (lcd.CubeGrid == null || ((MyCubeGrid)lcd.CubeGrid).MarkedForClose)
 				{
-					Log.Debug($"[{Name}] ⏭️ LCD grid gone — skipping write");
+					if (Log.IsDebugEnabled)
+						Log.Debug($"[{Name}] ⏭️ LCD grid gone — skipping write");
 					return;
 				}
 			}
@@ -1714,15 +1769,37 @@ namespace CCTVPlugin
 			try
 			{
 				// Auto HUD mode: if the LCD is on a non-static (moving) grid, force a fully
-				// transparent background so the feed overlays the pilot's view instead of
-				// blocking it. Explicit LcdBackgroundAlpha config only applies to static grids.
-				bool isOnDynamicGrid = false;
-				try { isOnDynamicGrid = (lcd.CubeGrid as MyCubeGrid)?.IsStatic == false; }
-				catch { }
+					// transparent background so the feed overlays the pilot's view instead of
+					// blocking it. Explicit LcdBackgroundAlpha config only applies to static grids.
+					bool isOnDynamicGrid = false;
+					try
+					{
+						var cubeGrid = lcd.CubeGrid;
+						if (cubeGrid != null)
+						{
+							// Try the interface property first (works in more Torch contexts),
+							// fall back to the concrete MyCubeGrid cast.
+							isOnDynamicGrid = !cubeGrid.IsStatic;
+						}
+					}
+					catch { }
+
+					// Per-LCD cockpit gate: dynamic-grid LCDs only update when a player is
+					// seated in a cockpit on that grid AND the spool-up period has elapsed.
+					// This prevents vehicle HUD LCDs from streaming when the cockpit is empty,
+					// and pauses them during the seat transition so SE's renderer can finish
+					// rebuilding LCD textures without competing with WriteText calls.
+					// Static-grid LCDs (base masters + slaves) are NOT affected by spool-up.
+					if (isOnDynamicGrid && (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0))
+						{
+							if (Log.IsDebugEnabled)
+								Log.Debug($"[{Name}] ⏭️ GATE: blocking dynamic LCD '{lcd.CustomName}' (cockpit={_playerInCockpitOnLcdGrid}, spool={_cockpitSpoolUpTicksRemaining})");
+							return;
+						}
 
 				int effectiveAlpha = isOnDynamicGrid ? 0 : Math.Max(0, Math.Min(255, _config.LcdBackgroundAlpha));
 
-				if (isOnDynamicGrid)
+				if (Log.IsDebugEnabled && isOnDynamicGrid)
 					Log.Debug($"[{Name}] 🚗 HUD mode: LCD '{lcd.CustomName}' is on a dynamic grid — transparent background applied");
 
 				// Auto-heatmap: remap SE color chars to a thermal palette for dynamic-grid HUD LCDs.
@@ -1759,10 +1836,13 @@ namespace CCTVPlugin
 		/// Applied automatically to single LCDs on non-static (moving) grids so the HUD
 		/// feed gets an infrared look without any player-facing config option.
 		/// </summary>
-		private static string RemapToHeatmap(string content)
+		private string RemapToHeatmap(string content)
 		{
 			const int SE_BASE = 0xE100;
-			var sb = new System.Text.StringBuilder(content.Length);
+			if (_heatmapSb == null || _heatmapSb.Capacity < content.Length)
+				_heatmapSb = new StringBuilder(content.Length);
+			else
+				_heatmapSb.Clear();
 
 			foreach (char c in content)
 			{
@@ -1788,15 +1868,15 @@ namespace CCTVPlugin
 					int nr = Math.Max(0, Math.Min(7, (int)(fr * 7f + 0.5f)));
 					int ng = Math.Max(0, Math.Min(7, (int)(fg * 7f + 0.5f)));
 					int nb = Math.Max(0, Math.Min(7, (int)(fb * 7f + 0.5f)));
-					sb.Append((char)(SE_BASE + ((nr << 6) | (ng << 3) | nb)));
+					_heatmapSb.Append((char)(SE_BASE + ((nr << 6) | (ng << 3) | nb)));
 				}
 				else
 				{
-					sb.Append(c);
+					_heatmapSb.Append(c);
 				}
 			}
 
-			return sb.ToString();
+			return _heatmapSb.ToString();
 		}
 
 		/// <summary>
@@ -1913,6 +1993,18 @@ namespace CCTVPlugin
 				{
 					try
 					{
+						// Skip slave LCDs on dynamic grids when cockpit is empty or spooling
+						if (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0)
+						{
+							try
+							{
+								var slaveGrid = slaveLcd.CubeGrid;
+								if (slaveGrid != null && !slaveGrid.IsStatic)
+									continue;
+							}
+							catch { }
+						}
+
 						slaveLcd.WriteText(masterText);
 						slaveLcd.ContentType = masterLcd.ContentType;
 						slaveLcd.Font = masterLcd.Font;
@@ -1922,11 +2014,13 @@ namespace CCTVPlugin
 						slaveLcd.TextPadding = masterLcd.TextPadding;
 						slaveLcd.Alignment = masterLcd.Alignment;
 
-						Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
+						if (Log.IsDebugEnabled)
+							Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
 					}
 					catch (Exception ex)
 					{
-						Log.Debug($"[{Name}] ⚠️ Slave copy failed (grid change?): {ex.GetType().Name}");
+						if (Log.IsDebugEnabled)
+							Log.Debug($"[{Name}] ⚠️ Slave copy failed (grid change?): {ex.GetType().Name}");
 					}
 				}
 			}
@@ -1943,6 +2037,18 @@ namespace CCTVPlugin
 						{
 							try
 							{
+								// Skip slave LCDs on dynamic grids when cockpit is empty or spooling
+								if (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0)
+								{
+									try
+									{
+										var slaveGrid = slaveLcd.CubeGrid;
+										if (slaveGrid != null && !slaveGrid.IsStatic)
+											continue;
+									}
+									catch { }
+								}
+
 								slaveLcd.WriteText(masterText);
 								slaveLcd.ContentType = masterLcd.ContentType;
 								slaveLcd.Font = masterLcd.Font;
@@ -1952,11 +2058,13 @@ namespace CCTVPlugin
 								slaveLcd.TextPadding = masterLcd.TextPadding;
 								slaveLcd.Alignment = masterLcd.Alignment;
 
-								Log.Debug($"[{Name}] ✅ Copied to single slave: '{slaveLcd.CustomName}'");
+								if (Log.IsDebugEnabled)
+									Log.Debug($"[{Name}] ✅ Copied to single slave: '{slaveLcd.CustomName}'");
 							}
 							catch (Exception ex)
 							{
-								Log.Debug($"[{Name}] ⚠️ Single slave copy failed (grid change?): {ex.GetType().Name}");
+								if (Log.IsDebugEnabled)
+									Log.Debug($"[{Name}] ⚠️ Single slave copy failed (grid change?): {ex.GetType().Name}");
 							}
 						}
 				}
@@ -1993,6 +2101,10 @@ namespace CCTVPlugin
 			_lcdCache.Clear();
 			_cachedSlavesByQuad = null;
 			_cachedSlavesKey = null;
+			// NOTE: cockpit cache is NOT invalidated here.  Cockpit block references
+			// remain valid across LCD name changes; only MarkedForClose invalidates them.
+			// Clearing it here caused a deadlock: _lcdCache empty → dynamic grids unknown
+			// → cockpit cache rebuilt empty → pilot never detected → stream dead.
 			Log.Debug($"[{Name}] LCD cache invalidated");
 		}
 
@@ -2070,12 +2182,13 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Checks whether any live player is within ProximityCheckRadius metres of any LCD
-		/// belonging to this connection (masters and slaves included).
-		/// Also detects whether any nearby player is seated in a cockpit on the same
-		/// grid as a CCTV LCD (dynamic grids only) — used to trigger the spool-up pause.
-		/// Updates _anyPlayerNearby / _playerInCockpitOnLcdGrid and logs state changes.
-		/// Must be called from the game thread.
+		/// Checks whether any live player is within ProximityCheckRadius metres of any
+		/// static-grid CCTV LCD, and whether any cockpit on a dynamic CCTV LCD grid
+		/// (or its mechanical subgrids) is occupied.
+		///
+		/// Zero entity scans: LCD positions are read from _lcdCache (already populated
+		/// by frame writes).  Cockpit blocks are discovered once from those same grids
+		/// via SE's grid-group API and cached until dirty.
 		/// </summary>
 		private void CheckPlayerProximity()
 		{
@@ -2087,85 +2200,115 @@ namespace CCTVPlugin
 				return;
 			}
 
-			// All LCDs for this connection — master panels AND slaves — share the prefix
-			// "{lcdPrefix} {baseName}" so a single StartsWith scan finds them all.
-			string baseName = _config.GetLiveFeedLcdBaseName();
-			string lcdPrefix = $"{_config.LcdPrefix} {baseName}";
+			// ── Derive LCD state from _lcdCache + slave cache (no entity scan!) ──
+			var staticLcdPositions = new List<Vector3D>();
+			var dynamicLcdGrids = new List<MyCubeGrid>();
+			var seenDynGridIds = new HashSet<long>();
 
-			var lcdPositions = new List<Vector3D>();
-			// Collect grid EntityIds that contain CCTV LCDs on dynamic (non-static) grids.
-			// Used below to detect cockpit-on-same-grid situations.
-			var lcdDynamicGridIds = new HashSet<long>();
-			try
+			foreach (var kvp in _lcdCache)
 			{
-				MyAPIGateway.Entities.GetEntities(null, entity =>
+				try
 				{
-					var grid = entity as MyCubeGrid;
-					if (grid == null || grid.MarkedForClose) return false;
-					try
-					{
-						foreach (var block in grid.GetFatBlocks())
-						{
-							var lcd = block as IMyTextPanel;
-							if (lcd != null && (lcd.CustomName ?? "").StartsWith(lcdPrefix, StringComparison.OrdinalIgnoreCase))
-							{
-								lcdPositions.Add(lcd.WorldMatrix.Translation);
-								if (!grid.IsStatic)
-									lcdDynamicGridIds.Add(grid.EntityId);
-							}
-						}
-					}
-					catch (InvalidOperationException) { } // grid blocks changed mid-iteration
-					return false;
-				});
-			}
-			catch (InvalidOperationException) { } // entity list changed mid-scan
+					var lcd = kvp.Value;
+					if (lcd?.CubeGrid == null) continue;
+					var grid = lcd.CubeGrid as MyCubeGrid;
+					if (grid == null || grid.MarkedForClose) continue;
 
-			if (lcdPositions.Count == 0)
-			{
-				// No LCD found yet — stay active so writes begin as soon as one appears
-				_anyPlayerNearby = true;
-				_playerInCockpitOnLcdGrid = false;
-				return;
+					if (grid.IsStatic)
+						staticLcdPositions.Add(lcd.WorldMatrix.Translation);
+					else if (seenDynGridIds.Add(grid.EntityId))
+						dynamicLcdGrids.Add(grid);
+				}
+				catch { }
 			}
 
-			float radiusSq = radius * radius;
-			var players = new List<IMyPlayer>();
-			MyAPIGateway.Players.GetPlayers(players);
-
-			bool foundNearby = false;
-			bool foundInCockpit = false;
-
-			foreach (var p in players)
+			// Include slave LCD positions — they live in _cachedSlavesByQuad, not
+			// _lcdCache, so without this a player near a slave but far from the
+			// master would fail the proximity check and all writes would stop.
+			if (_cachedSlavesByQuad != null)
 			{
-				var character = p.Character;
-				if (character == null || character.IsDead) continue;
-				Vector3D charPos = character.WorldMatrix.Translation;
-
-				bool isNear = lcdPositions.Any(pos => Vector3D.DistanceSquared(charPos, pos) <= radiusSq);
-				if (isNear)
-					foundNearby = true;
-
-				// Check if this player is seated in a cockpit on a dynamic grid that has CCTV LCDs.
-				// ControlledEntity is the cockpit/seat block when the player is seated.
-				if (!foundInCockpit && lcdDynamicGridIds.Count > 0)
+				foreach (var slaves in _cachedSlavesByQuad.Values)
 				{
-					try
+					foreach (var slaveLcd in slaves)
 					{
-						var controlled = p.Controller?.ControlledEntity as IMyCubeBlock;
-						if (controlled != null && controlled.CubeGrid != null)
+						try
 						{
-							if (lcdDynamicGridIds.Contains(controlled.CubeGrid.EntityId))
-								foundInCockpit = true;
+							if (slaveLcd?.CubeGrid == null) continue;
+							var grid = slaveLcd.CubeGrid as MyCubeGrid;
+							if (grid == null || grid.MarkedForClose) continue;
+
+							if (grid.IsStatic)
+								staticLcdPositions.Add(slaveLcd.WorldMatrix.Translation);
+							else if (seenDynGridIds.Add(grid.EntityId))
+								dynamicLcdGrids.Add(grid);
 						}
+						catch { }
 					}
-					catch { } // entity may be orphaned mid-check
 				}
 			}
 
-			_anyPlayerNearby = foundNearby;
+			if (staticLcdPositions.Count == 0 && dynamicLcdGrids.Count == 0)
+			{
+				// Cache not yet populated or just cleared by InvalidateLcdCache.
+				// MUST be optimistic: if _anyPlayerNearby stays false here, no
+				// frame writes happen → FindLCDByName never runs → _lcdCache stays
+				// empty → this branch fires forever = permanent LCD blackout.
+				_anyPlayerNearby = true;
+				return;
+			}
 
-			// Detect cockpit entry → trigger spool-up pause
+			// ── Cockpit detection (O(few)) ──────────────────────────────
+			// Rebuild only when we have dynamic grids to scan AND the cache is dirty.
+			// When _lcdCache maps a shared LCD name to the static-grid panel, dynamicLcdGrids
+			// will be empty — but the cockpit block refs from a previous rebuild are still
+			// valid, so we check them regardless.
+			bool foundInCockpit = false;
+
+			if (dynamicLcdGrids.Count > 0 && (_cockpitCacheDirty || _cockpitCache == null))
+				RebuildCockpitCache(dynamicLcdGrids);
+
+			if (_cockpitCache != null)
+			{
+				foreach (var cockpit in _cockpitCache)
+				{
+					try
+					{
+						if (cockpit.MarkedForClose) { _cockpitCacheDirty = true; continue; }
+						if (cockpit.Pilot != null) { foundInCockpit = true; break; }
+					}
+					catch { _cockpitCacheDirty = true; }
+				}
+			}
+
+			// ── Static-grid player proximity check ────────────────────────
+			bool foundNearby = false;
+			if (staticLcdPositions.Count > 0)
+			{
+				float radiusSq = radius * radius;
+				var players = new List<IMyPlayer>();
+				MyAPIGateway.Players.GetPlayers(players);
+
+				foreach (var p in players)
+				{
+					var character = p.Character;
+					if (character == null || character.IsDead) continue;
+					Vector3D charPos = character.WorldMatrix.Translation;
+
+					if (staticLcdPositions.Any(pos => Vector3D.DistanceSquared(charPos, pos) <= radiusSq))
+					{
+						foundNearby = true;
+						break;
+					}
+				}
+			}
+
+			_anyPlayerNearby = foundNearby || foundInCockpit;
+
+			if (Log.IsDebugEnabled)
+				Log.Debug($"[{Name}] 🔍 ProxCheck: staticLcds={staticLcdPositions.Count}, dynGrids={dynamicLcdGrids.Count}, " +
+					$"nearby={foundNearby}, cockpit={foundInCockpit}, cockpits={_cockpitCache?.Count ?? 0}");
+
+			// Cockpit entry/exit state changes
 			if (foundInCockpit && !_playerInCockpitOnLcdGrid)
 			{
 				_cockpitSpoolUpTicksRemaining = COCKPIT_SPOOL_UP_TICKS;
@@ -2173,18 +2316,123 @@ namespace CCTVPlugin
 			}
 			else if (!foundInCockpit && _playerInCockpitOnLcdGrid)
 			{
-				Log.Info($"[{Name}] 🪑 Player left cockpit on CCTV LCD grid — resuming normal writes");
+				Log.Info($"[{Name}] 🪑 Player left cockpit on CCTV LCD grid — blanking dynamic-grid LCDs");
 				_cockpitSpoolUpTicksRemaining = 0;
+				BlankDynamicGridLcds();
 			}
 			_playerInCockpitOnLcdGrid = foundInCockpit;
 
 			if (_anyPlayerNearby != _wasPlayerNearby)
 			{
 				Log.Info(_anyPlayerNearby
-					? $"[{Name}] 👁️ Player entered CCTV area ({radius:F0}m) - resuming LCD stream"
-					: $"[{Name}] 💤 No players within {radius:F0}m of any '{lcdPrefix}*' LCD - pausing LCD stream");
+					? $"[{Name}] 👁️ Player detected (nearby={foundNearby}, cockpit={foundInCockpit}) - resuming LCD stream"
+					: $"[{Name}] 💤 No players nearby or in cockpit — pausing LCD stream");
 				_wasPlayerNearby = _anyPlayerNearby;
 			}
+		}
+
+		/// <summary>
+		/// Discovers cockpit blocks on the dynamic grids that have CCTV LCDs, plus
+		/// any mechanically connected grids (rotors/pistons/hinges).
+		/// Uses SE's grid-group API — zero MyEntities.GetEntities() calls.
+		/// </summary>
+		private void RebuildCockpitCache(List<MyCubeGrid> dynamicLcdGrids)
+		{
+			_cockpitCache = new List<Sandbox.Game.Entities.MyCockpit>();
+			var scannedGridIds = new HashSet<long>();
+
+			foreach (var lcdGrid in dynamicLcdGrids)
+			{
+				// Get all mechanically connected grids (handles rotors, pistons, hinges)
+				// so cockpits on a parent/child subgrid are found without entity scans.
+				var connectedGrids = new List<IMyCubeGrid>();
+				try
+				{
+					var gridGroup = ((IMyCubeGrid)lcdGrid).GetGridGroup(GridLinkTypeEnum.Mechanical);
+					if (gridGroup != null)
+						gridGroup.GetGrids(connectedGrids);
+					else
+						connectedGrids.Add(lcdGrid);
+				}
+				catch
+				{
+					connectedGrids.Add(lcdGrid); // fallback: at least scan the LCD grid itself
+				}
+
+				foreach (var connGrid in connectedGrids)
+				{
+					var mcg = connGrid as MyCubeGrid;
+					if (mcg == null || mcg.MarkedForClose || mcg.IsStatic) continue;
+					if (!scannedGridIds.Add(mcg.EntityId)) continue;
+
+					try
+					{
+						foreach (var block in mcg.GetFatBlocks())
+						{
+							var cockpit = block as Sandbox.Game.Entities.MyCockpit;
+							if (cockpit != null)
+								_cockpitCache.Add(cockpit);
+						}
+					}
+					catch (InvalidOperationException) { }
+				}
+			}
+
+			_cockpitCacheDirty = false;
+			Log.Info($"[{Name}] 🔍 CockpitCache rebuilt: {_cockpitCache.Count} cockpit(s) from {scannedGridIds.Count} grid(s)");
+		}
+
+		/// <summary>
+		/// Blanks all cached LCDs that live on dynamic (non-static) grids by switching
+		/// their ContentType to NONE.  Called once when the last player leaves a cockpit
+		/// on a dynamic CCTV grid so the screen goes dark instead of showing a stale frame.
+		/// The normal WriteLCDContent path restores TEXT_AND_IMAGE on the next write.
+		/// Must be called from the game thread.
+		/// </summary>
+		private void BlankDynamicGridLcds()
+		{
+			int blanked = 0;
+
+			// Blank master LCDs from the cache
+			foreach (var kvp in _lcdCache)
+			{
+				try
+				{
+					var lcd = kvp.Value;
+					if (lcd == null) continue;
+					var cubeGrid = lcd.CubeGrid;
+					if (cubeGrid == null || cubeGrid.MarkedForClose || cubeGrid.IsStatic) continue;
+
+					lcd.WriteText("");
+					lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.NONE;
+					blanked++;
+				}
+				catch { } // block may be orphaned
+			}
+
+			// Blank slave LCDs too — they bypass WriteLCDContent entirely
+			if (_cachedSlavesByQuad != null)
+			{
+				foreach (var kvp in _cachedSlavesByQuad)
+				{
+					foreach (var slaveLcd in kvp.Value)
+					{
+						try
+						{
+							var slaveGrid = slaveLcd.CubeGrid;
+							if (slaveGrid == null || slaveGrid.MarkedForClose || slaveGrid.IsStatic) continue;
+
+							slaveLcd.WriteText("");
+							slaveLcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.NONE;
+							blanked++;
+						}
+						catch { }
+					}
+				}
+			}
+
+			if (blanked > 0)
+				Log.Info($"[{Name}] 🔲 Blanked {blanked} dynamic-grid LCD(s) (masters + slaves)");
 		}
 
 		/// <summary>

@@ -70,6 +70,8 @@ Slave LCDs (copies of a master) follow the same naming pattern for both types:
 
 The plugin will detect cameras, send GOTO messages and begin cycling. LCDs update automatically.
 
+> **⚠️ Capture client placement:** Spawn or park the fake client's character **away from your CCTV LCDs** (at least outside `ProximityCheckRadius`, default 150 m). The proximity gate pauses LCD writes when no *main account* player is nearby — if the capture client's character is standing next to the displays it counts as a nearby player and the LCDs will never sleep, wasting server resources when nobody is actually watching.
+
 ---
 
 ## Button Panel Control
