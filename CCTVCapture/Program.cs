@@ -31,6 +31,7 @@ namespace CCTVCapture
         private static CCTVCommon.PostProcessMode _postProcessMode = CCTVCommon.PostProcessMode.None;
         private static CCTVCommon.PostProcessMode _gridPostProcessMode = CCTVCommon.PostProcessMode.LightBlur;
         private static bool _desaturateColorMode = false;
+        private static bool _nightVisionMode = false;
         private static bool _cropToSquare = true;
 
         // Track current camera's LCD setup (for dual-resolution rendering)
@@ -550,6 +551,10 @@ namespace CCTVCapture
                             if (bool.TryParse(val, out bool desat))
                                 _desaturateColorMode = desat;
                             break;
+                        case "NightVisionMode":
+                            if (bool.TryParse(val, out bool nv))
+                                _nightVisionMode = nv;
+                            break;
                         case "CropCaptureToSquare":
                             if (bool.TryParse(val, out bool crop))
                                 _cropToSquare = crop;
@@ -626,7 +631,7 @@ namespace CCTVCapture
                         singleFrame = resized;
                     }
                     if (_useColorMode && _desaturateColorMode)
-                        AsciiConverter.DesaturateBitmap(singleFrame);
+                        AsciiConverter.DesaturateBitmap(singleFrame, _nightVisionMode);
                 }
 
                 if (_currentCameraHasGrid)
@@ -642,7 +647,7 @@ namespace CCTVCapture
                         gridFrame = resized;
                     }
                     if (_useColorMode && _desaturateColorMode)
-                        AsciiConverter.DesaturateBitmap(gridFrame);
+                        AsciiConverter.DesaturateBitmap(gridFrame, _nightVisionMode);
                 }
 
                 // Now parallelize the CPU-heavy ASCII conversion (thread-safe)
@@ -805,7 +810,7 @@ namespace CCTVCapture
                         fallbackSrc = fallbackProcessed;
                     }
                     if (_useColorMode && _desaturateColorMode)
-                        AsciiConverter.DesaturateBitmap(fallbackSrc);
+                        AsciiConverter.DesaturateBitmap(fallbackSrc, _nightVisionMode);
 
                     string compressed;
                     string frameMode;

@@ -241,7 +241,7 @@ namespace CCTVPlugin
 
             try
             {
-                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution} DesaturateColorMode={_config.DesaturateColorMode} CropCaptureToSquare={_config.CropCaptureToSquare}";
+                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution} DesaturateColorMode={_config.DesaturateColorMode} NightVisionMode={_config.NightVisionMode} CropCaptureToSquare={_config.CropCaptureToSquare}";
                 Send(message);
                 Log.Info($"Sent CONFIG to fake client: {_config.CaptureWidth}x{_config.CaptureHeight} @{_captureFps}fps color={_useColorMode} dither={_config.DitherMode} postproc={_config.PostProcessMode} gridPostProc={_config.GridPostProcessMode}");
             }

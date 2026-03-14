@@ -55,6 +55,11 @@
                 <TextBlock Text="  (grayscale via square color chars — requires Color Mode)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Night Vision (NV):" Width="160" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding NightVisionMode}" VerticalAlignment="Center"/>
+                <TextBlock Text="  (green NV tint — requires Desaturate)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Crop to Square:" Width="160" VerticalAlignment="Center"/>
                 <CheckBox IsChecked="{Binding CropCaptureToSquare}" VerticalAlignment="Center"/>
                 <TextBlock Text="  (correct proportions; off = wider FOV, stretched)" Foreground="Gray" VerticalAlignment="Center"/>
@@ -117,7 +122,7 @@
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Grid Content Shift:" Width="160" VerticalAlignment="Center"/>
-                <Slider Width="150" Minimum="-20" Maximum="20" Value="{Binding GridContentShift}" 
+                <Slider Width="150" Minimum="-100" Maximum="100" Value="{Binding GridContentShift}"
                         TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding GridContentShift, StringFormat={}{0} chars}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (+ shifts image right, − shifts left)" Foreground="Gray" VerticalAlignment="Center"/>
@@ -145,7 +150,7 @@
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Single Content Shift:" Width="160" VerticalAlignment="Center"/>
-                <Slider Width="150" Minimum="-20" Maximum="20" Value="{Binding SingleContentShift}" 
+                <Slider Width="150" Minimum="-100" Maximum="100" Value="{Binding SingleContentShift}"
                         TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding SingleContentShift, StringFormat={}{0} chars}" Width="60" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (+ shifts image right, − shifts left)" Foreground="Gray" VerticalAlignment="Center"/>

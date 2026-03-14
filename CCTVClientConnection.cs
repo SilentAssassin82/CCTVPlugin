@@ -198,6 +198,14 @@ namespace CCTVPlugin
 		private StringBuilder _shiftSb;
 		private StringBuilder _heatmapSb;
 
+		// Reusable StringBuilder for slave LCD copies — avoids GetText() string alloc.
+		private StringBuilder _slaveSb;
+
+		// Cached ParseColor result — LcdFontTint rarely changes but ParseColor is
+		// called on every grayscale WriteLCDContent, creating Split() garbage each time.
+		private string _cachedFontTintValue;
+		private Color _cachedFontTintColor = Color.White;
+
 		// Connection state
 		public bool IsConnected => _client != null && _client.Connected;
 		public string Name => _config.Name;
@@ -832,6 +840,7 @@ namespace CCTVPlugin
 							   $"GridPostProcessMode={_sharedConfig.GridPostProcessMode} " +
 							   $"LcdGridResolution={_sharedConfig.LcdGridResolution} " +
 							   $"DesaturateColorMode={_sharedConfig.DesaturateColorMode} " +
+							   $"NightVisionMode={_sharedConfig.NightVisionMode} " +
 							   $"CropCaptureToSquare={_sharedConfig.CropCaptureToSquare}";
 				Send(config);
 				return;
@@ -1351,12 +1360,12 @@ namespace CCTVPlugin
 					Log.Debug($"[{Name}] 🖥️ Writing {width}×{height} frame (BaseName: '{baseName}', Prefix: '{_config.LcdPrefix}')");
 
 				if (width == _sharedConfig.LcdSingleResolution && height == _sharedConfig.LcdSingleResolution)
-					{
-						string singleLcdName = $"{_config.LcdPrefix} {baseName}";
-						string shifted = ApplyContentShift(content, _sharedConfig.SingleContentShift);
-						WriteSingleLCD(singleLcdName, shifted, isColor);
-						CopyToSlaveLCDs(_config.LcdPrefix, baseName);
-					}
+						{
+							string singleLcdName = $"{_config.LcdPrefix} {baseName}";
+							StringBuilder shifted = ApplyContentShift(content, _sharedConfig.SingleContentShift);
+							WriteSingleLCD(singleLcdName, shifted, isColor);
+							CopyToSlaveLCDs(_config.LcdPrefix, baseName);
+						}
 				else if (width == _sharedConfig.LcdGridResolution && height == _sharedConfig.LcdGridResolution)
 				{
 					WriteGridLCDs(_config.LcdPrefix, baseName, content, isColor, width, height);
@@ -1379,7 +1388,7 @@ namespace CCTVPlugin
 		/// LCDs that don't exist are silently skipped — players may have any combination of
 		/// single panel, 2×2 grid, or both, so missing LCDs are never an error.
 		/// </summary>
-		private void WriteSingleLCD(string lcdName, string content, bool isColor, float? fontSizeOverride = null)
+		private void WriteSingleLCD(string lcdName, StringBuilder content, bool isColor, float? fontSizeOverride = null)
 		{
 			var lcd = FindLCDByName(lcdName, silent: true);
 			if (lcd == null)
@@ -1534,33 +1543,32 @@ namespace CCTVPlugin
 			if (Log.IsDebugEnabled && (vOffset != 0 || hOffset != 0))
 				Log.Debug($"[{Name}] GridOffset: v={vOffset} h={hOffset}, tlStartY={tlStartY}, blStartY={blStartY}, tlStartX={tlStartX}, trStartX={trStartX}");
 
-			string tlContent = ExtractQuadrant(content, lineCount, tlStartX, tlStartY, quadW, effectiveQuadH);
-			string trContent = ExtractQuadrant(content, lineCount, trStartX, tlStartY, quadW, effectiveQuadH);
-			string blContent = ExtractQuadrant(content, lineCount, tlStartX, blStartY, quadW, effectiveQuadH);
-			string brContent = ExtractQuadrant(content, lineCount, trStartX, blStartY, quadW, effectiveQuadH);
+			// Interleaved extract+write: each quadrant is extracted into _quadrantSb
+				// and immediately written to the LCD before the next ExtractQuadrant overwrites
+				// the buffer.  Eliminates 4 × ~33 KB .ToString() allocations per grid frame.
+				string tlLcdName = $"{lcdPrefix} {baseName}_TL";
+				StringBuilder quadSb = ExtractQuadrant(content, lineCount, tlStartX, tlStartY, quadW, effectiveQuadH);
+				if (Log.IsDebugEnabled)
+					Log.Debug($"[{Name}] Writing TL quadrant to '{tlLcdName}' ({quadSb.Length} chars, font {gridFontSize:F3})");
+				WriteSingleLCD(tlLcdName, quadSb, isColor, gridFontSize);
 
-			// Build full LCD names: "LCD_TV Test01_TL" format
-			// Pattern: <Prefix><space><BaseName><Quadrant>
-			string tlLcdName = $"{lcdPrefix} {baseName}_TL";
-			string trLcdName = $"{lcdPrefix} {baseName}_TR";
-			string blLcdName = $"{lcdPrefix} {baseName}_BL";
-			string brLcdName = $"{lcdPrefix} {baseName}_BR";
+				string trLcdName = $"{lcdPrefix} {baseName}_TR";
+				quadSb = ExtractQuadrant(content, lineCount, trStartX, tlStartY, quadW, effectiveQuadH);
+				if (Log.IsDebugEnabled)
+					Log.Debug($"[{Name}] Writing TR quadrant to '{trLcdName}' ({quadSb.Length} chars)");
+				WriteSingleLCD(trLcdName, quadSb, isColor, gridFontSize);
 
-			if (Log.IsDebugEnabled)
-				Log.Debug($"[{Name}] Writing TL quadrant to '{tlLcdName}' ({tlContent.Length} chars, font {gridFontSize:F3})");
-			WriteSingleLCD(tlLcdName, tlContent, isColor, gridFontSize);
+				string blLcdName = $"{lcdPrefix} {baseName}_BL";
+				quadSb = ExtractQuadrant(content, lineCount, tlStartX, blStartY, quadW, effectiveQuadH);
+				if (Log.IsDebugEnabled)
+					Log.Debug($"[{Name}] Writing BL quadrant to '{blLcdName}' ({quadSb.Length} chars)");
+				WriteSingleLCD(blLcdName, quadSb, isColor, gridFontSize);
 
-			if (Log.IsDebugEnabled)
-				Log.Debug($"[{Name}] Writing TR quadrant to '{trLcdName}' ({trContent.Length} chars)");
-			WriteSingleLCD(trLcdName, trContent, isColor, gridFontSize);
-
-			if (Log.IsDebugEnabled)
-				Log.Debug($"[{Name}] Writing BL quadrant to '{blLcdName}' ({blContent.Length} chars)");
-			WriteSingleLCD(blLcdName, blContent, isColor, gridFontSize);
-
-			if (Log.IsDebugEnabled)
-				Log.Debug($"[{Name}] Writing BR quadrant to '{brLcdName}' ({brContent.Length} chars)");
-			WriteSingleLCD(brLcdName, brContent, isColor, gridFontSize);
+				string brLcdName = $"{lcdPrefix} {baseName}_BR";
+				quadSb = ExtractQuadrant(content, lineCount, trStartX, blStartY, quadW, effectiveQuadH);
+				if (Log.IsDebugEnabled)
+					Log.Debug($"[{Name}] Writing BR quadrant to '{brLcdName}' ({quadSb.Length} chars)");
+				WriteSingleLCD(brLcdName, quadSb, isColor, gridFontSize);
 
 			_lcdWritesGrid++;
 
@@ -1573,8 +1581,10 @@ namespace CCTVPlugin
 		/// Uses sb.Append(string, startIndex, count) to slice directly from the original
 		/// content string — avoids 181 Substring allocations per quadrant (~90 KB each).
 		/// Reuses _quadrantSb to avoid a new StringBuilder backing array per call.
+		/// Returns the shared _quadrantSb — caller must consume (pass to WriteText)
+		/// before the next ExtractQuadrant call overwrites it.
 		/// </summary>
-		private string ExtractQuadrant(string content, int lineCount, int startX, int startY, int width, int height)
+		private StringBuilder ExtractQuadrant(string content, int lineCount, int startX, int startY, int width, int height)
 		{
 			int needed = width * height + height;
 			if (_quadrantSb == null || _quadrantSb.Capacity < needed)
@@ -1605,12 +1615,10 @@ namespace CCTVPlugin
 					_quadrantSb.Append('\n');
 			}
 
-			string result = _quadrantSb.ToString();
-
 			if (Log.IsDebugEnabled && startX == 0 && startY == 0)
-				Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {result.Length} chars (expected ~{width * height + height - 1})");
+				Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {_quadrantSb.Length} chars (expected ~{width * height + height - 1})");
 
-			return result;
+			return _quadrantSb;
 		}
 
 		/// <summary>
@@ -1619,15 +1627,19 @@ namespace CCTVPlugin
 		/// Negative shift prepends N spaces to each line (image moves right on LCD).
 		/// Returns the original string unchanged when shift is 0.
 		/// </summary>
-		private string ApplyContentShift(string content, int shift)
+		private StringBuilder ApplyContentShift(string content, int shift)
 		{
-			if (shift == 0 || string.IsNullOrEmpty(content))
-				return content;
-
 			if (_shiftSb == null || _shiftSb.Capacity < content.Length)
 				_shiftSb = new StringBuilder(content.Length);
 			else
 				_shiftSb.Clear();
+
+			if (shift == 0 || string.IsNullOrEmpty(content))
+			{
+				// No shift: copy into reusable buffer so callers always get StringBuilder
+				_shiftSb.Append(content);
+				return _shiftSb;
+			}
 
 			int i = 0;
 			while (i < content.Length)
@@ -1656,7 +1668,7 @@ namespace CCTVPlugin
 				i = lineEnd + 1;
 			}
 
-			return _shiftSb.ToString();
+			return _shiftSb;
 		}
 
 		/// <summary>
@@ -1746,8 +1758,10 @@ namespace CCTVPlugin
 
 		/// <summary>
 		/// Write content to a specific LCD.
+		/// Accepts StringBuilder to enable zero-copy writes via lcd.WriteText(StringBuilder),
+		/// eliminating per-frame string allocations (~33-131 KB) on the game thread.
 		/// </summary>
-		private void WriteLCDContent(IMyTextPanel lcd, string content, float fontSize, bool isColor)
+		private void WriteLCDContent(IMyTextPanel lcd, StringBuilder content, float fontSize, bool isColor)
 		{
 			if (lcd == null)
 				return;
@@ -1803,9 +1817,9 @@ namespace CCTVPlugin
 					Log.Debug($"[{Name}] 🚗 HUD mode: LCD '{lcd.CustomName}' is on a dynamic grid — transparent background applied");
 
 				// Auto-heatmap: remap SE color chars to a thermal palette for dynamic-grid HUD LCDs.
-				// No config toggle — any moving-grid LCD automatically gets the infrared look.
-				string writeContent = (isOnDynamicGrid && isColor) ? RemapToHeatmap(content) : content;
-				lcd.WriteText(writeContent);
+					// No config toggle — any moving-grid LCD automatically gets the infrared look.
+					StringBuilder writeContent = (isOnDynamicGrid && isColor) ? RemapToHeatmap(content) : content;
+					lcd.WriteText(writeContent);
 				lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
 				lcd.Font = "Monospace";
 				lcd.FontSize = fontSize;
@@ -1814,11 +1828,11 @@ namespace CCTVPlugin
 				lcd.BackgroundColor = new Color(0, 0, 0, (byte)effectiveAlpha);
 
 				// SE color chars encode their own color — white font lets them render correctly.
-				// Grayscale uses the configured font tint instead.
-				if (isColor)
-					lcd.FontColor = new Color(255, 255, 255);
-				else
-					lcd.FontColor = ParseColor(_sharedConfig.LcdFontTint);
+					// Grayscale uses the configured font tint instead.
+					if (isColor)
+						lcd.FontColor = new Color(255, 255, 255);
+					else
+						lcd.FontColor = GetCachedFontTint();
 			}
 			catch (Exception ex)
 			{
@@ -1836,16 +1850,17 @@ namespace CCTVPlugin
 		/// Applied automatically to single LCDs on non-static (moving) grids so the HUD
 		/// feed gets an infrared look without any player-facing config option.
 		/// </summary>
-		private string RemapToHeatmap(string content)
+		private StringBuilder RemapToHeatmap(StringBuilder input)
 		{
 			const int SE_BASE = 0xE100;
-			if (_heatmapSb == null || _heatmapSb.Capacity < content.Length)
-				_heatmapSb = new StringBuilder(content.Length);
+			if (_heatmapSb == null || _heatmapSb.Capacity < input.Length)
+				_heatmapSb = new StringBuilder(input.Length);
 			else
 				_heatmapSb.Clear();
 
-			foreach (char c in content)
+			for (int idx = 0; idx < input.Length; idx++)
 			{
+				char c = input[idx];
 				// SE color chars occupy 0xE100–0xE2FF (9-bit index: RRR GGG BBB)
 				if (c >= 0xE100 && c <= 0xE2FF)
 				{
@@ -1876,7 +1891,7 @@ namespace CCTVPlugin
 				}
 			}
 
-			return _heatmapSb.ToString();
+			return _heatmapSb;
 		}
 
 		/// <summary>
@@ -1978,61 +1993,69 @@ namespace CCTVPlugin
 			}
 
 			// Copy master content to each grid quadrant slave group
-			foreach (string quad in quadrants)
-			{
-				if (!slavesByQuad.TryGetValue(quad, out var slaves) || slaves.Count == 0)
-					continue;
-
-				string masterLcdName = $"{lcdPrefix} {baseName}{quad}";
-				var masterLcd = FindLCDByName(masterLcdName, silent: true);
-				if (masterLcd == null)
-					continue;
-
-				string masterText = masterLcd.GetText();
-				foreach (var slaveLcd in slaves)
+				foreach (string quad in quadrants)
 				{
-					try
+					if (!slavesByQuad.TryGetValue(quad, out var slaves) || slaves.Count == 0)
+						continue;
+
+					string masterLcdName = $"{lcdPrefix} {baseName}{quad}";
+					var masterLcd = FindLCDByName(masterLcdName, silent: true);
+					if (masterLcd == null)
+						continue;
+
+					// Read master text into reusable StringBuilder — avoids GetText() string alloc.
+					if (_slaveSb == null) _slaveSb = new StringBuilder(32768);
+					else _slaveSb.Clear();
+					masterLcd.ReadText(_slaveSb);
+
+					foreach (var slaveLcd in slaves)
 					{
-						// Skip slave LCDs on dynamic grids when cockpit is empty or spooling
-						if (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0)
+						try
 						{
-							try
+							// Skip slave LCDs on dynamic grids when cockpit is empty or spooling
+							if (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0)
 							{
-								var slaveGrid = slaveLcd.CubeGrid;
-								if (slaveGrid != null && !slaveGrid.IsStatic)
-									continue;
+								try
+								{
+									var slaveGrid = slaveLcd.CubeGrid;
+									if (slaveGrid != null && !slaveGrid.IsStatic)
+										continue;
+								}
+								catch { }
 							}
-							catch { }
+
+							slaveLcd.WriteText(_slaveSb);
+							slaveLcd.ContentType = masterLcd.ContentType;
+							slaveLcd.Font = masterLcd.Font;
+							slaveLcd.FontSize = masterLcd.FontSize;
+							slaveLcd.FontColor = masterLcd.FontColor;
+							slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
+							slaveLcd.TextPadding = masterLcd.TextPadding;
+							slaveLcd.Alignment = masterLcd.Alignment;
+
+							if (Log.IsDebugEnabled)
+								Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
 						}
-
-						slaveLcd.WriteText(masterText);
-						slaveLcd.ContentType = masterLcd.ContentType;
-						slaveLcd.Font = masterLcd.Font;
-						slaveLcd.FontSize = masterLcd.FontSize;
-						slaveLcd.FontColor = masterLcd.FontColor;
-						slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
-						slaveLcd.TextPadding = masterLcd.TextPadding;
-						slaveLcd.Alignment = masterLcd.Alignment;
-
-						if (Log.IsDebugEnabled)
-							Log.Debug($"[{Name}] ✅ Copied {quad} to slave: '{slaveLcd.CustomName}'");
-					}
-					catch (Exception ex)
-					{
-						if (Log.IsDebugEnabled)
-							Log.Debug($"[{Name}] ⚠️ Slave copy failed (grid change?): {ex.GetType().Name}");
+						catch (Exception ex)
+						{
+							if (Log.IsDebugEnabled)
+								Log.Debug($"[{Name}] ⚠️ Slave copy failed (grid change?): {ex.GetType().Name}");
+						}
 					}
 				}
-			}
 
-			// Copy master single LCD content to single slaves (e.g. "LCD_TV Test01_Slave")
-			if (slavesByQuad.TryGetValue("_SINGLE", out var singleSlaves) && singleSlaves.Count > 0)
-			{
-				string masterLcdName = $"{lcdPrefix} {baseName}";
-				var masterLcd = FindLCDByName(masterLcdName, silent: true);
-				if (masterLcd != null)
+				// Copy master single LCD content to single slaves (e.g. "LCD_TV Test01_Slave")
+				if (slavesByQuad.TryGetValue("_SINGLE", out var singleSlaves) && singleSlaves.Count > 0)
 				{
-					string masterText = masterLcd.GetText();
+					string singleMasterLcdName = $"{lcdPrefix} {baseName}";
+					var singleMasterLcd = FindLCDByName(singleMasterLcdName, silent: true);
+					if (singleMasterLcd != null)
+					{
+						// Read master text into reusable StringBuilder — avoids GetText() string alloc.
+						if (_slaveSb == null) _slaveSb = new StringBuilder(32768);
+						else _slaveSb.Clear();
+						singleMasterLcd.ReadText(_slaveSb);
+
 						foreach (var slaveLcd in singleSlaves)
 						{
 							try
@@ -2049,14 +2072,14 @@ namespace CCTVPlugin
 									catch { }
 								}
 
-								slaveLcd.WriteText(masterText);
-								slaveLcd.ContentType = masterLcd.ContentType;
-								slaveLcd.Font = masterLcd.Font;
-								slaveLcd.FontSize = masterLcd.FontSize;
-								slaveLcd.FontColor = masterLcd.FontColor;
-								slaveLcd.BackgroundColor = masterLcd.BackgroundColor;
-								slaveLcd.TextPadding = masterLcd.TextPadding;
-								slaveLcd.Alignment = masterLcd.Alignment;
+								slaveLcd.WriteText(_slaveSb);
+								slaveLcd.ContentType = singleMasterLcd.ContentType;
+								slaveLcd.Font = singleMasterLcd.Font;
+								slaveLcd.FontSize = singleMasterLcd.FontSize;
+								slaveLcd.FontColor = singleMasterLcd.FontColor;
+								slaveLcd.BackgroundColor = singleMasterLcd.BackgroundColor;
+								slaveLcd.TextPadding = singleMasterLcd.TextPadding;
+								slaveLcd.Alignment = singleMasterLcd.Alignment;
 
 								if (Log.IsDebugEnabled)
 									Log.Debug($"[{Name}] ✅ Copied to single slave: '{slaveLcd.CustomName}'");
@@ -2067,9 +2090,9 @@ namespace CCTVPlugin
 									Log.Debug($"[{Name}] ⚠️ Single slave copy failed (grid change?): {ex.GetType().Name}");
 							}
 						}
+					}
 				}
 			}
-		}
 
 		/// <summary>
 		/// Parse RGB color from string "R,G,B".
@@ -2090,6 +2113,21 @@ namespace CCTVPlugin
 			catch { }
 
 			return Color.White;
+		}
+
+		/// <summary>
+		/// Returns the cached font tint Color, re-parsing only when the config value changes.
+		/// Avoids string.Split() garbage on every grayscale WriteLCDContent call.
+		/// </summary>
+		private Color GetCachedFontTint()
+		{
+			string tint = _sharedConfig.LcdFontTint;
+			if (tint != _cachedFontTintValue)
+			{
+				_cachedFontTintColor = ParseColor(tint);
+				_cachedFontTintValue = tint;
+			}
+			return _cachedFontTintColor;
 		}
 
 		/// <summary>

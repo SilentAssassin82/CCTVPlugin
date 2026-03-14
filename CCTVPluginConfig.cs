@@ -42,6 +42,7 @@ namespace CCTVPlugin
         private float _proximityCheckRadius = 150f;
         private int _lcdGridResolution = 362;
         private bool _desaturateColorMode = false;
+        private bool _nightVisionMode = false;
         private bool _cropCaptureToSquare = true;
 
         // Suppresses ValidateFpsRatio during XML deserialization so property
@@ -244,6 +245,23 @@ namespace CCTVPlugin
         }
 
         /// <summary>
+        /// When enabled with Desaturate mode, maps grayscale luminance to a green
+        /// night-vision phosphor gradient (black → green → white-green) instead of
+        /// neutral gray. The tint is baked into pixel RGB before color char encoding
+        /// because SE font tint is ignored for color characters.
+        /// </summary>
+        [XmlElement("NightVisionMode")]
+        public bool NightVisionMode
+        {
+            get => _nightVisionMode;
+            set
+            {
+                _nightVisionMode = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
         /// When enabled, the capture client crops the viewport to a center square before
         /// resizing. Produces correct 1:1 proportions on the LCD but loses the left/right
         /// edges of a 16:9 viewport. When disabled, the full viewport is stretched to fit
@@ -372,7 +390,7 @@ namespace CCTVPlugin
         /// Horizontal content shift for the 2×2 grid panels (in characters).
         /// Moves the extraction window uniformly across all four quadrants.
         /// Positive values shift the image RIGHT on the LCDs. Negative values shift it LEFT.
-        /// Range: −20 to +20 chars. Default: 0.
+        /// Range: −100 to +100 chars. Default: 0.
         /// </summary>
         [XmlElement("GridContentShift")]
         public int GridContentShift
@@ -380,7 +398,7 @@ namespace CCTVPlugin
             get => _gridContentShift;
             set
             {
-                _gridContentShift = Math.Max(-20, Math.Min(20, value));
+                _gridContentShift = Math.Max(-100, Math.Min(100, value));
                 OnPropertyChanged();
             }
         }
@@ -440,7 +458,7 @@ namespace CCTVPlugin
         /// Horizontal content shift for single LCD panels (in characters).
         /// Independent of GridContentShift so each display type can be centred separately.
         /// Positive values shift the image RIGHT. Negative values shift it LEFT.
-        /// Range: −20 to +20 chars. Default: 0.
+        /// Range: −100 to +100 chars. Default: 0.
         /// </summary>
         [XmlElement("SingleContentShift")]
         public int SingleContentShift
@@ -448,7 +466,7 @@ namespace CCTVPlugin
             get => _singleContentShift;
             set
             {
-                _singleContentShift = Math.Max(-20, Math.Min(20, value));
+                _singleContentShift = Math.Max(-100, Math.Min(100, value));
                 OnPropertyChanged();
             }
         }
