@@ -17,6 +17,9 @@
     <!-- Exclude generated obj files from sub-projects to avoid duplicate attribute errors -->
     <Compile Remove="CCTVCapture\obj\**" />
     <Compile Remove="CCTVTester\obj\**" />
+    <!-- Exclude CCTVCapture-only files that depend on System.Windows.Forms -->
+    <Compile Remove="CCTVCapture\ConfigForm.cs" />
+    <Compile Remove="CCTVCapture\ConfigFormLauncher.cs" />
     <!-- Exclude AppData mod folders — mod scripts are compiled by SE, not this project -->
     <Compile Remove="$(APPDATA)\SpaceEngineers\Mods\**" />
     <None Remove="UI\CCTVPluginControl.xaml" />

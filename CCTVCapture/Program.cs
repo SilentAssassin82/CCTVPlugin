@@ -20,6 +20,9 @@ namespace CCTVCapture
         // Camera coordinate index
         private static Dictionary<string, (double X, double Y, double Z)> _cameraIndex = new Dictionary<string, (double, double, double)>();
 
+        // Client-side user preferences (loaded from local XML, shown in ConfigForm)
+        private static CCTVCommon.ClientSettings _clientSettings;
+
         private static string _serverHost = "localhost";
         private static int _serverPort = 12345;
         private static int _captureWidth = 178;
@@ -41,6 +44,8 @@ namespace CCTVCapture
         private static bool _currentCameraHasGrid = false;
         private static int _lcdGridRes = 362;   // Render resolution for 2×2 grid (configurable)
         private static int _lcdSingleRes = 181; // Render resolution for single LCD (always lcdGridRes / 2)
+        private static int _grayGridRes = 362;  // Grayscale grid resolution (independent of color)
+        private static int _graySingleRes = 181; // Grayscale single resolution (always grayGridRes / 2)
 
         // Verbose logging toggle (enable with -v flag)
         private static bool _verboseLogging = false;
@@ -69,28 +74,47 @@ namespace CCTVCapture
         private static int _maxReconnectAttempts = 10;
         private static int _reconnectDelayMs = 5000;       // 5 seconds between reconnect attempts
 
+        [STAThread]
         static void Main(string[] args)
         {
-            // Parse command-line arguments
-            _verboseLogging = args.Any(a => a == "-v" || a == "--verbose");
+            // Check for --nogui flag (skip settings UI, use saved/default settings)
+            bool noGui = args.Any(a => a == "--nogui");
 
-            // Parse --port and --host arguments for multi-client support
+            // Load persisted client settings (or defaults on first run)
+            _clientSettings = CCTVCommon.ClientSettings.Load();
+            _clientSettings.Validate();
+
+            // Parse command-line arguments — CLI overrides saved settings
+            _verboseLogging = args.Any(a => a == "-v" || a == "--verbose") || _clientSettings.VerboseLogging;
+
             for (int i = 0; i < args.Length; i++)
             {
                 if ((args[i] == "--port" || args[i] == "-p") && i + 1 < args.Length)
                 {
                     if (int.TryParse(args[i + 1], out int port))
-                    {
-                        _serverPort = port;
-                        Console.WriteLine($"[ARG] Using custom port: {_serverPort}");
-                    }
+                        _clientSettings.Port = port;
                 }
                 else if ((args[i] == "--host" || args[i] == "-h") && i + 1 < args.Length)
                 {
-                    _serverHost = args[i + 1];
-                    Console.WriteLine($"[ARG] Using custom host: {_serverHost}");
+                    _clientSettings.Host = args[i + 1];
                 }
             }
+
+            // Show settings UI (unless --nogui)
+#if CCTVCAPTURE
+            if (!noGui)
+            {
+                if (!ConfigFormLauncher.ShowAndApply(_clientSettings))
+                {
+                    Console.WriteLine("[INFO] User cancelled — exiting.");
+                    return;
+                }
+                // Settings were saved by the form on OK
+            }
+#endif
+
+            // Apply client settings as initial values
+            ApplyClientSettings();
 
             Console.WriteLine("=== CCTVCapture CCTV Screen Capture ===");
             if (_verboseLogging)
@@ -268,15 +292,20 @@ namespace CCTVCapture
                     Console.WriteLine("[WARN] No CONFIG received from server after 3 seconds, using defaults");
                 }
 
-                // Determine LCD mode based on capture resolution.
-                // Output frames are rendered at _lcdSingleRes (single) and _lcdGridRes (grid);
-                // capture resolution only affects initial screen grab quality.
-                _currentCameraHasSingleLcd = _captureWidth >= _lcdSingleRes && _captureHeight >= _lcdSingleRes;
-                _currentCameraHasGrid      = _captureWidth >= _lcdGridRes && _captureHeight >= _lcdGridRes;
+                // Send client preferences to server (alignment offsets, display FPS).
+                // These override the server's global defaults for this connection only.
+                SendClientPrefs();
+
+                // Determine LCD mode based on capture resolution and active mode.
+                // Color mode uses _lcdSingleRes/_lcdGridRes; grayscale uses _graySingleRes/_grayGridRes.
+                int activeSingleRes = _useColorMode ? _lcdSingleRes : _graySingleRes;
+                int activeGridRes   = _useColorMode ? _lcdGridRes   : _grayGridRes;
+                _currentCameraHasSingleLcd = _captureWidth >= activeSingleRes && _captureHeight >= activeSingleRes;
+                _currentCameraHasGrid      = _captureWidth >= activeGridRes && _captureHeight >= activeGridRes;
                 if (_currentCameraHasGrid)
-                    Console.WriteLine($"[INFO] ✅ Dual-frame mode ACTIVATED: {_lcdSingleRes}×{_lcdSingleRes} (single) + {_lcdGridRes}×{_lcdGridRes} (grid)");
+                    Console.WriteLine($"[INFO] ✅ Dual-frame mode ACTIVATED: {activeSingleRes}×{activeSingleRes} (single) + {activeGridRes}×{activeGridRes} (grid) [{(_useColorMode ? "color" : "grayscale")}]");
                 else if (_currentCameraHasSingleLcd)
-                    Console.WriteLine($"[INFO] ✅ Single-LCD mode: {_lcdSingleRes}×{_lcdSingleRes} output (capture {_captureWidth}×{_captureHeight})");
+                    Console.WriteLine($"[INFO] ✅ Single-LCD mode: {activeSingleRes}×{activeSingleRes} output (capture {_captureWidth}×{_captureHeight}) [{(_useColorMode ? "color" : "grayscale")}]");
                 else
                     Console.WriteLine($"[INFO] Legacy single-frame mode: {_captureWidth}×{_captureHeight}");
 
@@ -482,11 +511,76 @@ namespace CCTVCapture
             Console.ReadKey();
         }
 
+        /// <summary>
+        /// Apply client settings as the initial runtime values (before server CONFIG arrives).
+        /// </summary>
+        static void ApplyClientSettings()
+        {
+            _serverHost = _clientSettings.Host;
+            _serverPort = _clientSettings.Port;
+            _verboseLogging = _clientSettings.VerboseLogging;
+            _useColorMode = _clientSettings.UseColorMode;
+            _desaturateColorMode = _clientSettings.DesaturateColorMode;
+            _nightVisionMode = _clientSettings.NightVisionMode;
+            _cropToSquare = _clientSettings.CropCaptureToSquare;
+            _horizontalSquash = _clientSettings.HorizontalSquash;
+            _singleHorizontalSquash = _clientSettings.SingleHorizontalSquash;
+            _captureIntervalMs = 1000 / Math.Max(1, _clientSettings.PreferredCaptureFps);
+
+            if (Enum.TryParse<CCTVCommon.DitherMode>(_clientSettings.DitherMode, out var dm))
+            {
+                _ditherMode = dm;
+                _useDithering = dm != CCTVCommon.DitherMode.None;
+            }
+            if (Enum.TryParse<CCTVCommon.PostProcessMode>(_clientSettings.PostProcessMode, out var pp))
+                _postProcessMode = pp;
+            if (Enum.TryParse<CCTVCommon.PostProcessMode>(_clientSettings.GridPostProcessMode, out var gpp))
+                _gridPostProcessMode = gpp;
+
+            Console.WriteLine($"[CLIENT] Settings applied: {_serverHost}:{_serverPort}");
+            Console.WriteLine($"[CLIENT]   Color={_useColorMode} Desat={_desaturateColorMode} NV={_nightVisionMode} Crop={_cropToSquare}");
+            Console.WriteLine($"[CLIENT]   CaptureFPS={_clientSettings.PreferredCaptureFps} DisplayFPS={_clientSettings.PreferredDisplayFps} Dither={_ditherMode} PostProc={_postProcessMode} GridPostProc={_gridPostProcessMode}");
+            Console.WriteLine($"[CLIENT]   Squash grid={_horizontalSquash:F2} single={_singleHorizontalSquash:F2}");
+            Console.WriteLine($"[CLIENT]   GridVOffset={_clientSettings.GridVerticalOffset} GridHOffset={_clientSettings.GridHorizontalOffset} GridShift={_clientSettings.GridContentShift} SingleShift={_clientSettings.SingleContentShift}");
+        }
+
+        /// <summary>
+        /// Send CLIENTPREFS to the server so it can apply per-connection overrides
+        /// for alignment offsets and display FPS.
+        /// </summary>
+        static void SendClientPrefs()
+        {
+            try
+            {
+                int effectiveDisplayFps = _clientSettings.EffectiveDisplayFps;
+                string prefs = $"CLIENTPREFS " +
+                    $"DisplayFps={effectiveDisplayFps} " +
+                    $"GridVerticalOffset={_clientSettings.GridVerticalOffset} " +
+                    $"GridHorizontalOffset={_clientSettings.GridHorizontalOffset} " +
+                    $"GridContentShift={_clientSettings.GridContentShift} " +
+                    $"SingleContentShift={_clientSettings.SingleContentShift} " +
+                    $"LcdFontTint={_clientSettings.LcdFontTint}";
+                _writer.WriteLine(prefs);
+                Console.WriteLine($">> CLIENTPREFS sent (DisplayFPS={effectiveDisplayFps}, " +
+                    $"GridVOff={_clientSettings.GridVerticalOffset}, GridHOff={_clientSettings.GridHorizontalOffset}, " +
+                    $"GridShift={_clientSettings.GridContentShift}, SingleShift={_clientSettings.SingleContentShift}, " +
+                    $"Tint={_clientSettings.LcdFontTint})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WARN] Failed to send CLIENTPREFS: {ex.Message}");
+            }
+        }
+
         static void ParseServerConfig(string configLine)
         {
             try
             {
                 // Format: CONFIG Key1=Value1 Key2=Value2 ...
+                // Server-enforced: resolution, grid resolution (client cannot override).
+                // Server-max-bounded: CaptureFps, DisplayFps (client can lower via preferences).
+                // Client-controlled: visual settings — applied from _clientSettings, server
+                //   values are ignored so the user's local preferences take precedence.
                 string[] parts = configLine.Substring(7).Split(' ');
                 foreach (string part in parts)
                 {
@@ -498,6 +592,7 @@ namespace CCTVCapture
 
                     switch (key)
                     {
+                        // ── Server-enforced (resolution must match LCD layout) ──
                         case "CaptureWidth":
                                 if (int.TryParse(val, out int w))
                                     _captureWidth = Math.Max(64, Math.Min(700, w));
@@ -505,41 +600,6 @@ namespace CCTVCapture
                             case "CaptureHeight":
                                 if (int.TryParse(val, out int h))
                                     _captureHeight = Math.Max(64, Math.Min(700, h));
-                            break;
-                        case "CaptureFps":
-                            if (int.TryParse(val, out int fps) && fps > 0)
-                                _captureIntervalMs = 1000 / Math.Max(1, Math.Min(30, fps));
-                            break;
-                        case "UseColorMode":
-                            if (bool.TryParse(val, out bool color))
-                                _useColorMode = color;
-                            break;
-                        case "UseDithering":
-                            if (bool.TryParse(val, out bool dither))
-                            {
-                                _useDithering = dither;
-                                // Backward compat: if DitherMode hasn't been set yet,
-                                // map the legacy bool to Bayer (the original default)
-                                if (dither && _ditherMode == CCTVCommon.DitherMode.None)
-                                    _ditherMode = CCTVCommon.DitherMode.Bayer;
-                                else if (!dither)
-                                    _ditherMode = CCTVCommon.DitherMode.None;
-                            }
-                            break;
-                        case "DitherMode":
-                            if (Enum.TryParse<CCTVCommon.DitherMode>(val, out var ditherMode))
-                            {
-                                _ditherMode = ditherMode;
-                                _useDithering = ditherMode != CCTVCommon.DitherMode.None;
-                            }
-                            break;
-                        case "PostProcessMode":
-                            if (Enum.TryParse<CCTVCommon.PostProcessMode>(val, out var mode))
-                                _postProcessMode = mode;
-                            break;
-                        case "GridPostProcessMode":
-                            if (Enum.TryParse<CCTVCommon.PostProcessMode>(val, out var gridMode))
-                                _gridPostProcessMode = gridMode;
                             break;
                         case "LcdGridResolution":
                             if (int.TryParse(val, out int gridRes))
@@ -549,30 +609,57 @@ namespace CCTVCapture
                                 _lcdSingleRes = _lcdGridRes / 2;
                             }
                             break;
+                        case "GrayscaleGridResolution":
+                            if (int.TryParse(val, out int grayRes))
+                            {
+                                int clamped = Math.Max(64, Math.Min(700, grayRes));
+                                _grayGridRes = (clamped % 2 != 0) ? clamped - 1 : clamped;
+                                _graySingleRes = _grayGridRes / 2;
+                            }
+                            break;
+
+                        // ── Server-max-bounded (client can lower, not exceed) ──
+                        case "CaptureFps":
+                            if (int.TryParse(val, out int serverFps) && serverFps > 0)
+                            {
+                                int serverMax = Math.Max(1, Math.Min(30, serverFps));
+                                _clientSettings.ServerMaxFps = serverMax;
+                                int effectiveFps = _clientSettings.EffectiveFps;
+                                _captureIntervalMs = 1000 / effectiveFps;
+                                if (_clientSettings.PreferredCaptureFps > serverMax)
+                                    Console.WriteLine($"[CONFIG] Capture FPS clamped to server max: {effectiveFps} (preferred {_clientSettings.PreferredCaptureFps}, server max {serverMax})");
+                            }
+                            break;
+                        case "DisplayFps":
+                            if (int.TryParse(val, out int serverDispFps) && serverDispFps > 0)
+                            {
+                                int serverMaxDisp = Math.Max(1, Math.Min(10, serverDispFps));
+                                _clientSettings.ServerMaxDisplayFps = serverMaxDisp;
+                                if (_clientSettings.PreferredDisplayFps > serverMaxDisp)
+                                    Console.WriteLine($"[CONFIG] Display FPS clamped to server max: {_clientSettings.EffectiveDisplayFps} (preferred {_clientSettings.PreferredDisplayFps}, server max {serverMaxDisp})");
+                            }
+                            break;
+
+                        // ── Client-controlled visual settings ──
+                        // These are intentionally NOT overridden by the server.
+                        // The client's local preferences (from ConfigForm) take precedence.
+                        case "UseColorMode":
+                        case "UseDithering":
+                        case "DitherMode":
+                        case "PostProcessMode":
+                        case "GridPostProcessMode":
                         case "DesaturateColorMode":
-                            if (bool.TryParse(val, out bool desat))
-                                _desaturateColorMode = desat;
-                            break;
                         case "NightVisionMode":
-                            if (bool.TryParse(val, out bool nv))
-                                _nightVisionMode = nv;
-                            break;
                         case "CropCaptureToSquare":
-                            if (bool.TryParse(val, out bool crop))
-                                _cropToSquare = crop;
-                            break;
                         case "HorizontalSquash":
-                            if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float hsquash))
-                                _horizontalSquash = hsquash;
-                            break;
                         case "SingleHorizontalSquash":
-                            if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float shsquash))
-                                _singleHorizontalSquash = shsquash;
+                            // Ignored — using client preferences
                             break;
                     }
                 }
 
-                Console.WriteLine("[CONFIG] Applied server settings");
+                Console.WriteLine($"[CONFIG] Server settings applied (resolution: {_captureWidth}x{_captureHeight}, color grid: {_lcdGridRes}, gray grid: {_grayGridRes}, FPS: {1000 / _captureIntervalMs})");
+                Console.WriteLine($"[CONFIG] Client visual preferences retained: Color={_useColorMode} Desat={_desaturateColorMode} NV={_nightVisionMode} Dither={_ditherMode}");
             }
             catch (Exception ex)
             {
@@ -623,6 +710,10 @@ namespace CCTVCapture
                 // ⚡ PARALLEL DUAL-FRAME RENDERING: Render both resolutions simultaneously
                 // This is 30-50% faster than sequential rendering for dual-frame mode
 
+                // Select resolutions based on active mode (color vs grayscale)
+                int effectiveSingleRes = _useColorMode ? _lcdSingleRes : _graySingleRes;
+                int effectiveGridRes   = _useColorMode ? _lcdGridRes   : _grayGridRes;
+
                 // IMPORTANT: Create resized bitmaps on main thread FIRST
                 // (Bitmap is not thread-safe - can't read from multiple threads)
                 // Post-processing is applied per resolution after resize:
@@ -636,8 +727,8 @@ namespace CCTVCapture
                     // Compensate: capture has maxSquash baked in, single LCD wants _singleHorizontalSquash.
                     // Making the bitmap narrower lets the converter stretch undo the excess squash.
                     float singleComp = (maxSquash > 0f) ? (_singleHorizontalSquash / maxSquash) : 1f;
-                    int singleW = Math.Max(1, (int)(_lcdSingleRes * singleComp));
-                    Bitmap resized = new Bitmap(capture, singleW, _lcdSingleRes);
+                    int singleW = Math.Max(1, (int)(effectiveSingleRes * singleComp));
+                    Bitmap resized = new Bitmap(capture, singleW, effectiveSingleRes);
                     if (_postProcessMode != CCTVCommon.PostProcessMode.None)
                     {
                         singleFrame = AsciiConverter.ApplyPostProcess(resized, _postProcessMode);
@@ -655,8 +746,8 @@ namespace CCTVCapture
                 {
                     // Compensate: capture has maxSquash, grid wants _horizontalSquash.
                     float gridComp = (maxSquash > 0f) ? (_horizontalSquash / maxSquash) : 1f;
-                    int gridW = Math.Max(1, (int)(_lcdGridRes * gridComp));
-                    Bitmap resized = new Bitmap(capture, gridW, _lcdGridRes);
+                    int gridW = Math.Max(1, (int)(effectiveGridRes * gridComp));
+                    Bitmap resized = new Bitmap(capture, gridW, effectiveGridRes);
                     if (_gridPostProcessMode != CCTVCommon.PostProcessMode.None)
                     {
                         gridFrame = AsciiConverter.ApplyPostProcess(resized, _gridPostProcessMode);
@@ -678,7 +769,7 @@ namespace CCTVCapture
                 if (singleFrame != null)
                 {
                     Bitmap frameToConvert = singleFrame; // Capture for lambda
-                    int res = _lcdSingleRes;
+                    int res = effectiveSingleRes;
                     singleTask = Task.Run(() =>
                     {
                         try
@@ -737,7 +828,7 @@ namespace CCTVCapture
                 if (gridFrame != null)
                 {
                     Bitmap frameToConvert = gridFrame; // Capture for lambda
-                    int res = _lcdGridRes;
+                    int res = effectiveGridRes;
                     gridTask = Task.Run(() =>
                     {
                         try
@@ -796,10 +887,10 @@ namespace CCTVCapture
                 if (singleTask != null)
                 {
                     var result = singleTask.Result;
-                    string singleFrameCommand = $"FRAME {_lcdSingleRes} {_lcdSingleRes} {result.mode} {result.compressed}";
+                    string singleFrameCommand = $"FRAME {effectiveSingleRes} {effectiveSingleRes} {result.mode} {result.compressed}";
 
                     if (shouldLog)
-                        Console.WriteLine($">> FRAME {_lcdSingleRes} {_lcdSingleRes} {result.mode} ... ({singleFrameCommand.Length} bytes) [Single LCD]");
+                        Console.WriteLine($">> FRAME {effectiveSingleRes} {effectiveSingleRes} {result.mode} ... ({singleFrameCommand.Length} bytes) [Single LCD]");
 
                     _writer.WriteLine(singleFrameCommand);
                 }
@@ -807,10 +898,10 @@ namespace CCTVCapture
                 if (gridTask != null)
                 {
                     var result = gridTask.Result;
-                    string gridFrameCommand = $"FRAME {_lcdGridRes} {_lcdGridRes} {result.mode} {result.compressed}";
+                    string gridFrameCommand = $"FRAME {effectiveGridRes} {effectiveGridRes} {result.mode} {result.compressed}";
 
                     if (shouldLog)
-                        Console.WriteLine($">> FRAME {_lcdGridRes} {_lcdGridRes} {result.mode} ... ({gridFrameCommand.Length} bytes) [Grid]");
+                        Console.WriteLine($">> FRAME {effectiveGridRes} {effectiveGridRes} {result.mode} ... ({gridFrameCommand.Length} bytes) [Grid]");
 
                     _writer.WriteLine(gridFrameCommand);
                 }

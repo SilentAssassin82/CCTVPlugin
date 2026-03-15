@@ -104,6 +104,11 @@ namespace CCTVPlugin
 		private readonly AutoResetEvent _sendEvent = new AutoResetEvent(false);
 		private const int MAX_SEND_QUEUE = 100;
 
+		// Per-reconnect cancellation flag: set before closing the old client so the
+		// previous send thread exits its loop without needing _isRunning = false
+		// (which would kill the entire connection, not just the old client's threads).
+		private volatile bool _sendCancelled;
+
 		// LCD panel cache — avoids per-frame entity scans.
 		// Invalidated by InvalidateLcdCache() on every camera rescan.
 		private readonly Dictionary<string, IMyTextPanel> _lcdCache =
@@ -151,7 +156,15 @@ namespace CCTVPlugin
 		// separate ticks so they never coincide, halving per-tick LCD work.
 		private int _singleDisplayTicks = 0;
 		private int _gridDisplayTicks;
-		private readonly int _displayFpsInterval;
+		private int _displayFpsInterval;
+
+		// Per-connection client preference overrides (set via CLIENTPREFS command).
+		// Null = use _sharedConfig default.  Applied in WriteGridLCDs / WriteSingleLCD.
+		private int? _clientGridVerticalOffset;
+		private int? _clientGridHorizontalOffset;
+		private int? _clientGridContentShift;
+		private int? _clientSingleContentShift;
+		private string _clientLcdFontTint;
 
 		// Persistent latest frame per resolution type.
 		// Populated by the cheap per-tick drain, consumed on display ticks.
@@ -609,9 +622,10 @@ namespace CCTVPlugin
 		{
 			Log.Info($"[{Name}] Send thread started");
 
-			while (_isRunning)
+			while (_isRunning && !_sendCancelled)
 			{
 				_sendEvent.WaitOne(500); // wake on signal or every 500ms
+				if (_sendCancelled) break;
 
 				var stream = _stream;
 				if (stream == null) continue;
@@ -709,13 +723,35 @@ namespace CCTVPlugin
 						Log.Info($"[{Name}] ✅ Auth passed — CCTVCapture verified");
 						// --- end handshake ---
 
-						// Close previous client before accepting the new one so the old
-						// handler thread sees its connection die and exits cleanly.
+						// ── Stop old threads before accepting the new client ──
+						// Signal the old send thread to exit (it checks _sendCancelled).
+						_sendCancelled = true;
+						_sendEvent.Set();
+
+						// Close previous client so the old handler thread's ReadLine
+						// returns null / throws, causing it to exit.
 						var oldClient = _client;
 						if (oldClient != null)
 						{
 							try { oldClient.Close(); } catch { }
 						}
+
+						// Wait for old threads to exit so they don't race with the
+						// new send/handler threads on the shared stream and queue.
+						const int REJOIN_TIMEOUT_MS = 3000;
+						if (_sendThread != null && _sendThread.IsAlive)
+						{
+							if (!_sendThread.Join(REJOIN_TIMEOUT_MS))
+								Log.Warn($"[{Name}] Old send thread did not exit within {REJOIN_TIMEOUT_MS}ms");
+						}
+						if (_handlerThread != null && _handlerThread.IsAlive)
+						{
+							if (!_handlerThread.Join(REJOIN_TIMEOUT_MS))
+								Log.Warn($"[{Name}] Old handler thread did not exit within {REJOIN_TIMEOUT_MS}ms");
+						}
+
+						// Reset cancellation for the new send thread
+						_sendCancelled = false;
 
 						_client = candidate;
 						_stream = candidateStream;
@@ -867,17 +903,82 @@ namespace CCTVPlugin
 			if (message == "GETCONFIG")
 			{
 				string config = $"CONFIG CaptureWidth={_sharedConfig.CaptureWidth} CaptureHeight={_sharedConfig.CaptureHeight} " +
-							   $"CaptureFps={_sharedConfig.CaptureFps} UseColorMode={_sharedConfig.UseColorMode} " +
+							   $"CaptureFps={_sharedConfig.CaptureFps} DisplayFps={_sharedConfig.DisplayFps} " +
+							   $"UseColorMode={_sharedConfig.UseColorMode} " +
 							   $"UseDithering={_sharedConfig.UseDithering} DitherMode={_sharedConfig.DitherMode} " +
 							   $"PostProcessMode={_sharedConfig.PostProcessMode} " +
 							   $"GridPostProcessMode={_sharedConfig.GridPostProcessMode} " +
 							   $"LcdGridResolution={_sharedConfig.LcdGridResolution} " +
+							   $"GrayscaleGridResolution={_sharedConfig.GrayscaleGridResolution} " +
 							   $"DesaturateColorMode={_sharedConfig.DesaturateColorMode} " +
 							   $"NightVisionMode={_sharedConfig.NightVisionMode} " +
 							   $"CropCaptureToSquare={_sharedConfig.CropCaptureToSquare} " +
 							   $"HorizontalSquash={_sharedConfig.HorizontalSquash.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
 								   $"SingleHorizontalSquash={_sharedConfig.SingleHorizontalSquash.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 				Send(config);
+				return;
+			}
+
+			// CLIENTPREFS command — per-connection overrides for alignment and display FPS
+			if (message.StartsWith("CLIENTPREFS "))
+			{
+				string[] parts = message.Substring(12).Split(' ');
+				foreach (string part in parts)
+				{
+					string[] kv = part.Split(new[] { '=' }, 2);
+					if (kv.Length != 2) continue;
+
+					string key = kv[0].Trim();
+					string val = kv[1].Trim();
+
+					switch (key)
+					{
+						case "DisplayFps":
+							if (int.TryParse(val, out int clientDispFps))
+							{
+								int clamped = Math.Max(1, Math.Min(_sharedConfig.DisplayFps, clientDispFps));
+								_displayFpsInterval = 60 / clamped;
+								_gridDisplayTicks = _displayFpsInterval / 2;
+								Log.Info($"[{Name}] CLIENTPREFS DisplayFps={clamped} (interval={_displayFpsInterval} ticks)");
+							}
+							break;
+						case "GridVerticalOffset":
+							if (int.TryParse(val, out int gvo))
+								_clientGridVerticalOffset = Math.Max(-30, Math.Min(30, gvo));
+							break;
+						case "GridHorizontalOffset":
+							if (int.TryParse(val, out int gho))
+								_clientGridHorizontalOffset = Math.Max(-30, Math.Min(30, gho));
+							break;
+						case "GridContentShift":
+							if (int.TryParse(val, out int gcs))
+								_clientGridContentShift = Math.Max(-100, Math.Min(100, gcs));
+							break;
+						case "SingleContentShift":
+							if (int.TryParse(val, out int scs))
+								_clientSingleContentShift = Math.Max(-100, Math.Min(100, scs));
+							break;
+						case "LcdFontTint":
+							// Format: "R,G,B" — validate and store
+							string[] rgb = val.Split(',');
+							if (rgb.Length == 3 &&
+								byte.TryParse(rgb[0].Trim(), out _) &&
+								byte.TryParse(rgb[1].Trim(), out _) &&
+								byte.TryParse(rgb[2].Trim(), out _))
+							{
+								_clientLcdFontTint = val;
+								// Invalidate cached tint so it re-parses on next frame
+								_cachedFontTintValue = null;
+							}
+							break;
+					}
+				}
+				Log.Info($"[{Name}] CLIENTPREFS applied: GridVOff={_clientGridVerticalOffset ?? _sharedConfig.GridVerticalOffset}, " +
+					$"GridHOff={_clientGridHorizontalOffset ?? _sharedConfig.GridHorizontalOffset}, " +
+					$"GridShift={_clientGridContentShift ?? _sharedConfig.GridContentShift}, " +
+					$"SingleShift={_clientSingleContentShift ?? _sharedConfig.SingleContentShift}, " +
+					$"Tint={_clientLcdFontTint ?? _sharedConfig.LcdFontTint}");
+				Send("OK CLIENTPREFS applied");
 				return;
 			}
 
@@ -1189,19 +1290,21 @@ namespace CCTVPlugin
 			}
 
 			// ── 1. Drain queue every tick (cheap) ──────────────────────────────
-			// Keep the latest frame per resolution type in persistent fields so
-			// stale frames never accumulate and display ticks always have fresh data.
-			int gridRes = _sharedConfig.LcdGridResolution;
-			lock (_frameQueueLock)
-			{
-				while (_frameQueue.Count > 0)
+				// Keep the latest frame per resolution type in persistent fields so
+				// stale frames never accumulate and display ticks always have fresh data.
+				int gridRes = _sharedConfig.LcdGridResolution;
+				int grayGridRes = _sharedConfig.GrayscaleGridResolution;
+				lock (_frameQueueLock)
 				{
-					var frame = _frameQueue.Dequeue();
-					if (frame.width == gridRes && frame.height == gridRes)
+					while (_frameQueue.Count > 0)
 					{
-						_pendingGridFrame = frame;
-						_hasPendingGridFrame = true;
-					}
+						var frame = _frameQueue.Dequeue();
+						if ((frame.width == gridRes && frame.height == gridRes) ||
+							(frame.width == grayGridRes && frame.height == grayGridRes))
+						{
+							_pendingGridFrame = frame;
+							_hasPendingGridFrame = true;
+						}
 					else
 					{
 						_pendingSingleFrame = frame;
@@ -1404,21 +1507,23 @@ namespace CCTVPlugin
 				if (Log.IsDebugEnabled)
 					Log.Debug($"[{Name}] 🖥️ Writing {width}×{height} frame (BaseName: '{baseName}', Prefix: '{_config.LcdPrefix}')");
 
-				if (width == _sharedConfig.LcdSingleResolution && height == _sharedConfig.LcdSingleResolution)
-						{
-							string singleLcdName = $"{_config.LcdPrefix} {baseName}";
-							StringBuilder shifted = ApplyContentShift(content, _sharedConfig.SingleContentShift);
-							WriteSingleLCD(singleLcdName, shifted, isColor);
-							CopyToSlaveLCDs(_config.LcdPrefix, baseName);
-						}
-				else if (width == _sharedConfig.LcdGridResolution && height == _sharedConfig.LcdGridResolution)
-				{
-					WriteGridLCDs(_config.LcdPrefix, baseName, content, isColor, width, height);
-				}
-				else
-				{
-					Log.Warn($"[{Name}] Unsupported resolution: {width}×{height} (expected {_sharedConfig.LcdSingleResolution} or {_sharedConfig.LcdGridResolution})");
-				}
+				if ((width == _sharedConfig.LcdSingleResolution && height == _sharedConfig.LcdSingleResolution) ||
+						(width == _sharedConfig.GrayscaleSingleResolution && height == _sharedConfig.GrayscaleSingleResolution))
+							{
+								string singleLcdName = $"{_config.LcdPrefix} {baseName}";
+									StringBuilder shifted = ApplyContentShift(content, _clientSingleContentShift ?? _sharedConfig.SingleContentShift);
+								WriteSingleLCD(singleLcdName, shifted, isColor);
+								CopyToSlaveLCDs(_config.LcdPrefix, baseName);
+							}
+					else if ((width == _sharedConfig.LcdGridResolution && height == _sharedConfig.LcdGridResolution) ||
+							 (width == _sharedConfig.GrayscaleGridResolution && height == _sharedConfig.GrayscaleGridResolution))
+					{
+						WriteGridLCDs(_config.LcdPrefix, baseName, content, isColor, width, height);
+					}
+					else
+					{
+						Log.Warn($"[{Name}] Unsupported resolution: {width}×{height} (expected single {_sharedConfig.LcdSingleResolution}/{_sharedConfig.GrayscaleSingleResolution} or grid {_sharedConfig.LcdGridResolution}/{_sharedConfig.GrayscaleGridResolution})");
+					}
 			}
 			catch (Exception ex)
 			{
@@ -1445,22 +1550,25 @@ namespace CCTVPlugin
 			}
 
 			float fontSize;
-			if (fontSizeOverride.HasValue)
-			{
-				// Grid quadrant panel: transparent LCDs need a larger font (1.12×) to
-				// overlap the panel borders and hide the seams between the 4 panels.
-				fontSize = fontSizeOverride.Value;
-				if (IsTransparentLcd(lcd))
+				if (fontSizeOverride.HasValue)
 				{
-					fontSize *= 1.12f;
-					if (Log.IsDebugEnabled)
-						Log.Debug($"[{Name}] 🔍 Transparent LCD detected for '{lcdName}', adjusted fontSize: {fontSize:F3}");
+					fontSize = fontSizeOverride.Value;
 				}
-			}
-			else
-			{
-				fontSize = CalculateAutoFontSize(isColor);
-			}
+				else
+				{
+					fontSize = CalculateAutoFontSize(isColor);
+				}
+
+				// Transparent LCDs need a 1.12× font boost — SE's Monospace font
+					// leaves visible inter-cell gaps at normal size on transparent panels.
+					// Applies to both grid quadrants (hides panel seams) and single panels
+					// (eliminates the tartan/scanline pattern on HUD overlays).
+					if (IsTransparentLcd(lcd))
+					{
+						fontSize *= 1.12f;
+						if (Log.IsDebugEnabled)
+							Log.Debug($"[{Name}] 🔍 Transparent LCD '{lcdName}', boost 1.12×, fontSize: {fontSize:F3}");
+					}
 
 			if (Log.IsDebugEnabled)
 				Log.Debug($"[{Name}] ✅ Writing to single LCD '{lcdName}' ({content.Length} chars, color: {isColor}, fontSize: {fontSize:F3})");
@@ -1500,9 +1608,11 @@ namespace CCTVPlugin
 		private float CalculateAutoFontSize(bool isColor)
 		{
 			// Single LCD uses its own font base so it can be tuned without affecting the grid.
-			//   colour    → SingleLcdFontSize × 1
-			//   grayscale → SingleLcdFontSize × 2  (SE Monospace chars are ~½ as wide as colour)
-			float fontSize = isColor ? _sharedConfig.SingleLcdFontSize : _sharedConfig.SingleLcdFontSize * 2f;
+			// Grayscale uses the dedicated GrayscaleSingleLcdFontSize (auto-synced from
+			// GrayscaleGridResolution) × 2 because SE Monospace chars are ~½ as wide as colour.
+			float fontSize = isColor
+				? _sharedConfig.SingleLcdFontSize
+				: _sharedConfig.GrayscaleSingleLcdFontSize * 2f;
 			fontSize *= _sharedConfig.FontScale;
 			return Math.Max(0.03f, Math.Min(0.35f, fontSize));
 		}
@@ -1559,28 +1669,29 @@ namespace CCTVPlugin
 					}
 
 					// Font size: grayscale chars are ~half the width of colour chars in SE Monospace,
-			// so grayscale uses 2× the base GridFontSize to fill each panel horizontally.
-			float gridFontSize = isColor
-				? _sharedConfig.GridFontSize
-				: _sharedConfig.GridFontSize * 2f;
+					// so grayscale uses 2× the base font size to fill each panel horizontally.
+					// When the server has independent grayscale resolution, use its dedicated font.
+					float gridFontSize = isColor
+						? _sharedConfig.GridFontSize
+						: _sharedConfig.GrayscaleGridFontSize * 2f;
 
 			// Derive per-quadrant row count from the actual frame.
 			int effectiveQuadH = lineCount / 2;
 
 			// GridVerticalOffset: positive creates overlap at the seam to close the
 			// physical gap between LCD blocks.
-			int vOffset = _sharedConfig.GridVerticalOffset;
+			int vOffset = _clientGridVerticalOffset ?? _sharedConfig.GridVerticalOffset;
 			int tlStartY = Math.Max(0, Math.Min(vOffset, effectiveQuadH - 1));
 			int blStartY = Math.Max(0, effectiveQuadH - vOffset);
 
 			// GridHorizontalOffset: same principle for the vertical seam.
-			int hOffset = _sharedConfig.GridHorizontalOffset;
+			int hOffset = _clientGridHorizontalOffset ?? _sharedConfig.GridHorizontalOffset;
 
 			// GridContentShift: uniform horizontal shift applied to ALL quadrants.
 			// Positive = image moves left on LCDs (compensates for SE's built-in
 			// left padding). Physically slides the extraction window right so more
 			// of the left edge is visible and the right edge is cropped slightly.
-			int shift = _sharedConfig.GridContentShift;
+			int shift = _clientGridContentShift ?? _sharedConfig.GridContentShift;
 
 			int tlStartX = Math.Max(0, Math.Min(hOffset, quadW - 1) + shift);
 			int trStartX = Math.Max(0, quadW - hOffset + shift);
@@ -2173,7 +2284,7 @@ namespace CCTVPlugin
 		/// </summary>
 		private Color GetCachedFontTint()
 		{
-			string tint = _sharedConfig.LcdFontTint;
+			string tint = _clientLcdFontTint ?? _sharedConfig.LcdFontTint;
 			if (tint != _cachedFontTintValue)
 			{
 				_cachedFontTintColor = ParseColor(tint);

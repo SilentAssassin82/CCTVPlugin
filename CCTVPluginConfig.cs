@@ -46,6 +46,9 @@ namespace CCTVPlugin
         private bool _cropCaptureToSquare = true;
         private float _horizontalSquash = 1.0f;
             private float _singleHorizontalSquash = 1.0f;
+        private int _grayscaleGridResolution = 362;
+        private float _grayscaleGridFontSize = 0.1f;
+        private float _grayscaleSingleLcdFontSize = 0.1f;
 
             // Suppresses ValidateFpsRatio
         // setters don't fire against stale default values before all elements
@@ -171,9 +174,6 @@ namespace CCTVPlugin
             {
                 _captureWidth = value;
                 OnPropertyChanged();
-                // Keep grid resolution in sync
-                if (_lcdGridResolution != value)
-                    LcdGridResolution = value;
             }
         }
 
@@ -185,9 +185,6 @@ namespace CCTVPlugin
             {
                 _captureHeight = value;
                 OnPropertyChanged();
-                // Keep grid resolution in sync
-                if (_lcdGridResolution != value)
-                    LcdGridResolution = value;
             }
         }
 
@@ -543,17 +540,8 @@ namespace CCTVPlugin
                     OnPropertyChanged(nameof(SingleLcdFontSize));
                 }
 
-                // Keep capture resolution in sync — they must always match
-                if (_captureWidth != _lcdGridResolution)
-                {
-                    _captureWidth = _lcdGridResolution;
-                    OnPropertyChanged(nameof(CaptureWidth));
-                }
-                if (_captureHeight != _lcdGridResolution)
-                {
-                    _captureHeight = _lcdGridResolution;
-                    OnPropertyChanged(nameof(CaptureHeight));
-                }
+                // Keep capture resolution in sync — must be at least max(color, grayscale)
+                SyncCaptureToMaxResolution();
             }
         }
 
@@ -562,6 +550,105 @@ namespace CCTVPlugin
         /// </summary>
         [XmlIgnore]
         public int LcdSingleResolution => _lcdGridResolution / 2;
+
+        /// <summary>
+        /// Output render resolution for the 2×2 LCD grid when the client is in grayscale mode.
+        /// Independent of LcdGridResolution so grayscale can run at higher resolution (e.g. 700)
+        /// without affecting color mode bandwidth. Must be an even number between 64 and 700.
+        /// </summary>
+        [XmlElement("GrayscaleGridResolution")]
+        public int GrayscaleGridResolution
+        {
+            get => _grayscaleGridResolution;
+            set
+            {
+                int clamped = Math.Max(64, Math.Min(700, value));
+                _grayscaleGridResolution = (clamped % 2 != 0) ? clamped - 1 : clamped;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(GrayscaleSingleResolution));
+
+                // Auto-sync grayscale font sizes from resolution.
+                // The base font is calculated identically to the color formula;
+                // the ×2 grayscale multiplier is applied later in WriteGridLCDs
+                // and CalculateAutoFontSize when rendering to the LCD.
+                int grayCharsPerPanel = _grayscaleGridResolution / 2;
+                float autoFont = FONT_RESOLUTION_CONSTANT / grayCharsPerPanel;
+                autoFont = Math.Max(0.05f, Math.Min(0.2f, autoFont));
+                if (Math.Abs(_grayscaleGridFontSize - autoFont) > 0.001f)
+                {
+                    _grayscaleGridFontSize = autoFont;
+                    OnPropertyChanged(nameof(GrayscaleGridFontSize));
+                }
+                if (Math.Abs(_grayscaleSingleLcdFontSize - autoFont) > 0.001f)
+                {
+                    _grayscaleSingleLcdFontSize = autoFont;
+                    OnPropertyChanged(nameof(GrayscaleSingleLcdFontSize));
+                }
+
+                // Keep capture resolution in sync — must be at least max(color, grayscale)
+                SyncCaptureToMaxResolution();
+            }
+        }
+
+        /// <summary>
+        /// Output render resolution for a single LCD panel in grayscale mode.
+        /// Always half of GrayscaleGridResolution.
+        /// </summary>
+        [XmlIgnore]
+        public int GrayscaleSingleResolution => _grayscaleGridResolution / 2;
+
+        /// <summary>
+        /// Base font size for 2×2 grid panels in grayscale mode.
+        /// Auto-calculated from GrayscaleGridResolution using the same formula
+        /// as the color GridFontSize. The ×2 grayscale multiplier is applied
+        /// at render time in WriteGridLCDs.
+        /// </summary>
+        [XmlElement("GrayscaleGridFontSize")]
+        public float GrayscaleGridFontSize
+        {
+            get => _grayscaleGridFontSize;
+            set
+            {
+                _grayscaleGridFontSize = Math.Max(0.05f, Math.Min(0.2f, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Base font size for single LCD panels in grayscale mode.
+        /// Auto-calculated from GrayscaleGridResolution using the same formula
+        /// as the color SingleLcdFontSize. The ×2 grayscale multiplier is applied
+        /// at render time in CalculateAutoFontSize.
+        /// </summary>
+        [XmlElement("GrayscaleSingleLcdFontSize")]
+        public float GrayscaleSingleLcdFontSize
+        {
+            get => _grayscaleSingleLcdFontSize;
+            set
+            {
+                _grayscaleSingleLcdFontSize = Math.Max(0.05f, Math.Min(0.2f, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Syncs CaptureWidth/Height to the larger of LcdGridResolution and GrayscaleGridResolution
+        /// so the screen grab is always large enough for both modes.
+        /// </summary>
+        private void SyncCaptureToMaxResolution()
+        {
+            int maxRes = Math.Max(_lcdGridResolution, _grayscaleGridResolution);
+            if (_captureWidth != maxRes)
+            {
+                _captureWidth = maxRes;
+                OnPropertyChanged(nameof(CaptureWidth));
+            }
+            if (_captureHeight != maxRes)
+            {
+                _captureHeight = maxRes;
+                OnPropertyChanged(nameof(CaptureHeight));
+            }
+        }
 
         /// <summary>
         /// Radius (metres) within which at least one player must be present for LCD frames to be written.
@@ -680,6 +767,16 @@ namespace CCTVPlugin
                             correctFont = Math.Max(0.05f, Math.Min(0.2f, correctFont));
                             config._singleLcdFontSize = correctFont;
                             config._gridFontSize = correctFont;
+
+                            // Same fix-up for grayscale font sizes
+                            int grayCharsPerPanel = config._grayscaleGridResolution / 2;
+                            float correctGrayFont = FONT_RESOLUTION_CONSTANT / grayCharsPerPanel;
+                            correctGrayFont = Math.Max(0.05f, Math.Min(0.2f, correctGrayFont));
+                            config._grayscaleGridFontSize = correctGrayFont;
+                            config._grayscaleSingleLcdFontSize = correctGrayFont;
+
+                            // Ensure capture covers both resolutions
+                            config.SyncCaptureToMaxResolution();
 
                             Log.Info($"Loaded config from {path}");
                             return config;

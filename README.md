@@ -18,12 +18,12 @@ Server-side. Manages camera scanning, multiplayer GOTO messages, frame routing a
 Install to: `Torch/Plugins/CCTVPlugin/`
 
 ### 2. `CCTVCapture.exe`
-External application. Captures the SE window, converts frames to color ASCII and streams them to the plugin over TCP.
+External application. Captures the SE window, converts frames to color ASCII and streams them to the plugin over TCP. Shows a **settings GUI** on launch for connection, visual mode, quality and alignment options.
 Run from: `CCTVCapture/bin/Release/net48/CCTVCapture.exe`
 
-Accepts command-line arguments for multi-client setups:
+Command-line arguments (override saved settings):
 ```
-CCTVCapture.exe --port 12346 --host 192.168.1.100
+CCTVCapture.exe --port 12346 --host 192.168.1.100 --nogui --verbose
 ```
 
 ### 3. CCTV Spectator Controller — Client-Side Mod
@@ -161,41 +161,110 @@ LCD_TVCamera Hangar  →  LCD_TV Hangar
 
 ## Configuration
 
-`Torch/Instance/CCTVPlugin.cfg`:
+### Server — `Torch/Instance/CCTVPlugin.cfg`
 
 ```xml
 <TcpPort>12345</TcpPort>
 <CameraRescanTicks>1800</CameraRescanTicks>
+<EnableHeartbeat>false</EnableHeartbeat>
 <EnableAutoCameraCycling>true</EnableAutoCameraCycling>
 <CameraCycleIntervalSeconds>10</CameraCycleIntervalSeconds>
 <SpectatorSteamId>YOUR_FAKE_CLIENT_STEAM_ID</SpectatorSteamId>
 <LcdPrefix>LCD_TV</LcdPrefix>
 <CameraPrefix>LCD_TVCamera</CameraPrefix>
+<LcdFontTint>255,255,255</LcdFontTint>
 <LcdGridResolution>362</LcdGridResolution>
-<CaptureFps>2</CaptureFps>
+<GrayscaleGridResolution>362</GrayscaleGridResolution>
+<CaptureFps>10</CaptureFps>
+<DisplayFps>10</DisplayFps>
 <UseColorMode>true</UseColorMode>
 <DesaturateColorMode>false</DesaturateColorMode>
+<NightVisionMode>false</NightVisionMode>
 <CropCaptureToSquare>true</CropCaptureToSquare>
+<HorizontalSquash>1.0</HorizontalSquash>
+<SingleHorizontalSquash>1.0</SingleHorizontalSquash>
+<DitherMode>None</DitherMode>
+<PostProcessMode>None</PostProcessMode>
+<GridPostProcessMode>None</GridPostProcessMode>
 <GridFontSize>0.1</GridFontSize>
-<GridVerticalOffset>0</GridVerticalOffset>
-<SingleLcdFontSize>0.080</SingleLcdFontSize>
+<GridContentShift>0</GridContentShift>
+<GridVerticalOffset>5</GridVerticalOffset>
+<GridHorizontalOffset>0</GridHorizontalOffset>
+<SingleLcdFontSize>0.1</SingleLcdFontSize>
+<SingleContentShift>0</SingleContentShift>
+<FontScale>1.0</FontScale>
+<AutoAdjustFontSize>true</AutoAdjustFontSize>
 <ProximityCheckRadius>150</ProximityCheckRadius>
+<EnableVerboseFrameLogging>false</EnableVerboseFrameLogging>
 <UseMultiClientMode>false</UseMultiClientMode>
 ```
 
-`LcdGridResolution` — output resolution for the 2×2 LCD grid (and capture). Must be an even number between 64 and 700. The single-LCD resolution is always half this value. **Auto-calculated from `GridFontSize`** so the content exactly fills each panel at the chosen font — move the font slider and the resolution follows. Can still be overridden manually.
+#### Setting reference
 
-`GridFontSize` — base font size for 2×2 grid panels (0.05–0.15). Changing this value auto-calculates `LcdGridResolution` to fill the panel edge-to-edge (e.g. 0.055 → 658, 0.075 → 482, 0.100 → 362). Grayscale automatically doubles this value.
+| Setting | Default | Description |
+|---|---|---|
+| `TcpPort` | 12345 | TCP port for CCTVCapture connections (legacy single-client mode) |
+| `CameraRescanTicks` | 1800 | Ticks between camera block rescans (60 ticks = 1 second) |
+| `EnableHeartbeat` | false | Enable PING/PONG heartbeat between plugin and capture client |
+| `EnableAutoCameraCycling` | true | Automatically cycle through cameras |
+| `CameraCycleIntervalSeconds` | 10 | Seconds between camera switches (min 5) |
+| `SpectatorSteamId` | 0 | Steam ID of the fake client account |
+| `CameraPrefix` | LCD_TVCamera | Prefix for camera block names |
+| `LcdPrefix` | LCD_TV | Prefix for LCD panel names |
+| `LcdFontTint` | 255,255,255 | RGB tint for grayscale LCD font color |
+| `LcdGridResolution` | 362 | Color mode resolution for the 2×2 grid (even, 64–700). Auto-calculated from `GridFontSize` |
+| `GrayscaleGridResolution` | 362 | Grayscale mode resolution for the 2×2 grid (even, 64–700). Independent of color resolution — grayscale can run higher without affecting color bandwidth |
+| `CaptureFps` | 10 | Capture FPS (1–30). Server maximum — clients clamp to this |
+| `DisplayFps` | 10 | LCD write FPS (1–10). Must be ≤ CaptureFps |
+| `UseColorMode` | true | Enable 512-color SE palette mode |
+| `DesaturateColorMode` | false | Square-pixel B&W via color chars (requires Color Mode) |
+| `NightVisionMode` | false | Green night-vision phosphor tint (requires Desaturate) |
+| `CropCaptureToSquare` | true | Center-crop 16:9 viewport to 1:1 for correct proportions |
+| `HorizontalSquash` | 1.0 | Horizontal aspect correction for 2×2 grid (0.5–1.5). >1.0 compresses horizontally |
+| `SingleHorizontalSquash` | 1.0 | Horizontal aspect correction for single LCD (0.5–1.5) |
+| `DitherMode` | None | Dithering algorithm: `None`, `Bayer`, `FloydSteinberg` |
+| `PostProcessMode` | None | Pre-filter for single LCD: `None`, `LightBlur`, `MediumBlur`, `Sharpen` |
+| `GridPostProcessMode` | None | Pre-filter for 2×2 grid: `None`, `LightBlur`, `MediumBlur`, `Sharpen` |
+| `GridFontSize` | 0.1 | Base font for 2×2 grid panels (0.05–0.15). Auto-calculates `LcdGridResolution` |
+| `GridContentShift` | 0 | Horizontal content shift for grid panels in characters (−100 to +100) |
+| `GridVerticalOffset` | 5 | Vertical row offset to close the grid seam (−30 to +30) |
+| `GridHorizontalOffset` | 0 | Horizontal column offset to close the grid seam (−30 to +30) |
+| `SingleLcdFontSize` | 0.1 | Base font for single LCD panels (0.05–0.15) |
+| `SingleContentShift` | 0 | Horizontal content shift for single LCD in characters (−100 to +100) |
+| `FontScale` | 1.0 | Global font scale multiplier |
+| `AutoAdjustFontSize` | true | Scale font based on resolution automatically |
+| `ProximityCheckRadius` | 150 | Distance (m) within which a player must be present for LCD writes. 0 = always write |
+| `EnableVerboseFrameLogging` | false | Log `[FRAME]` messages at INFO level |
+| `UseMultiClientMode` | false | Enable multiple CCTVCapture instances |
 
-`DesaturateColorMode` — when `true` (and `UseColorMode` is also `true`), the captured image is desaturated to grayscale before encoding into SE color characters. This produces **square-pixel B&W** output using the color char pipeline — no 1:2 aspect ratio issues, auto-fit resolution works correctly, and dithering still applies. The classic grayscale mode (`UseColorMode=false`) is kept for LCD font tint support.
+> **Auto-fit resolution:** `GridFontSize` automatically calculates `LcdGridResolution` so content fills each panel edge-to-edge (e.g. 0.055 → 658, 0.075 → 482, 0.100 → 362). Grayscale doubles the font at render time. The `GrayscaleGridResolution` slider is independent so you can run grayscale at higher resolution without increasing color mode bandwidth.
 
-`CropCaptureToSquare` — when `true` (default), center-crops the SE viewport to a square before resizing. Fixes the ~44% horizontal squash from stretching a 16:9 capture into a 1:1 LCD. SE can run at any normal resolution. Set to `false` for the legacy wider-FOV stretched mode.
+### Client — `CCTVCapture.settings.xml`
 
-`GridVerticalOffset` — row offset for the 2×2 grid to close the physical seam between top and bottom LCD panels (−30 to +30, default 5). With auto-fit resolution the offset should be 0 or very small.
+CCTVCapture shows a **settings GUI** on launch where you can configure connection, visual mode, quality, and alignment options. Settings are saved to `CCTVCapture.settings.xml` next to the executable and persist between sessions. Pass `--nogui` to skip the form and use saved settings.
 
-`SingleLcdFontSize` — base font size for single LCD panels (0.05–0.15). Independent of grid font size.
+Client settings that overlap with server settings (FPS, dithering, post-processing, offsets, squash) are **sent to the server via `CLIENTPREFS`** on connect and applied immediately — no server restart needed. FPS values are clamped to the server maximum.
 
-`ProximityCheckRadius` — distance in metres within which at least one player must be present for LCD writes to occur. Set to `0` to always write regardless of player position.
+| Setting | Default | Description |
+|---|---|---|
+| `Host` | localhost | Server hostname or IP |
+| `Port` | 12345 | Server TCP port |
+| `UseColorMode` | true | Color or grayscale mode |
+| `DesaturateColorMode` | false | B&W via color chars |
+| `NightVisionMode` | false | Green NV tint |
+| `CropCaptureToSquare` | true | Center-crop to 1:1 |
+| `PreferredFps` | 10 | Preferred capture FPS (clamped to server max) |
+| `PreferredDisplayFps` | 2 | Preferred LCD write FPS (clamped to server max) |
+| `DitherMode` | None | `None` / `Bayer` / `FloydSteinberg` |
+| `PostProcessMode` | None | Single LCD pre-filter |
+| `GridPostProcessMode` | LightBlur | 2×2 grid pre-filter |
+| `HorizontalSquash` | 1.0 | Grid horizontal aspect correction |
+| `SingleHorizontalSquash` | 1.0 | Single LCD horizontal aspect correction |
+| `GridVerticalOffset` | 5 | Grid vertical seam offset |
+| `GridHorizontalOffset` | 0 | Grid horizontal seam offset |
+| `GridContentShift` | 0 | Grid horizontal content shift |
+| `SingleContentShift` | 0 | Single LCD horizontal content shift |
+| `LcdFontTint` | 255,255,255 | Grayscale font tint (R,G,B) |
 
 ### Multi-client mode
 
@@ -237,15 +306,22 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 
 - True color video — SE's hidden 0xE100 palette (512 colors, 9-bit RGB)
 - **Desaturate (B&W) mode** — square-pixel grayscale via the color char pipeline; no aspect ratio issues, dithering still applies
+- **Night vision mode** — green phosphor NV tint baked into pixel RGB before encoding. Requires Desaturate mode. Produces a convincing starlight-scope look
 - **Crop to Square** — center-crops 16:9 viewport to 1:1 before conversion; correct proportions without needing a custom SE resolution. Toggle off for wider FOV with stretched proportions
-- **Night vision mode** — classic grayscale (`UseColorMode=false`) with green `LcdFontTint` (e.g. `0,255,0`) produces a convincing starlight-scope look at ~6× less bandwidth than colour
+- **Horizontal squash correction** — independent aspect-ratio sliders for grid and single LCD to compensate for SE character cell proportions
 - **Auto-fit resolution** — `GridFontSize` automatically calculates `LcdGridResolution` so content fills each panel edge-to-edge with no seam
+- **Independent grayscale resolution** — `GrayscaleGridResolution` is separate from color resolution, so grayscale can run at higher res without increasing color bandwidth
+- **Dithering** — `Bayer` (stable, low flicker) or `FloydSteinberg` (smoother gradients) applied before color quantisation
+- **Post-processing filters** — `LightBlur`, `MediumBlur`, or `Sharpen` pre-filters for single LCD and 2×2 grid independently
+- **Content shift sliders** — horizontal shift (in characters) for grid and single LCD panels independently to centre the image
 - GZip frame compression (~14× ratio over uncompressed; negligible bandwidth)
 - Configurable LCD render resolution — single slider controls capture and grid resolution (single LCD = half)
-- 2×2 grid offset sliders — close the physical seam between LCD panels
+- 2×2 grid offset sliders — close the physical seam between LCD panels (vertical and horizontal)
 - Independent font size tuning — separate Grid Font Size and Single LCD Font Size controls
 - Slave LCD support — single slaves (`LCD_TV Test01_Slave`) and grid quadrant slaves (`LCD_TV Test01_TL_Slave`); any number per master; slave grids require an active antenna
 - Multi-client mode — independent camera sets per instance
+- **CCTVCapture settings GUI** — graphical settings form on launch with connection, visual mode, quality, and alignment options. Settings persist between sessions. Pass `--nogui` to skip
+- **Client preferences sync** — visual settings (dithering, post-processing, offsets, squash, font tint) are sent to the server on connect via `CLIENTPREFS` and applied immediately — no server restart needed
 - **Button panel control** — Next / Prev / Reset actions assignable to any in-game button panel via G-menu
 - **Camera loops** — group cameras into `_L1`/`_L2` sets; Next Loop / Prev Loop switches the active group on the same LCD with no stale frame
 - **Auto HUD mode** — LCDs on moving (non-static) grids automatically receive a fully transparent background, turning the feed into a cockpit HUD overlay
@@ -253,6 +329,8 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - Adaptive cycle timing — EWMA of settle times, floored at the configured interval; resets automatically on every loop switch so the new loop's cameras re-tune independently
 - Proximity gate — LCD writes pause automatically when no players are nearby
 - LCD reference caching — entity scans only on startup and rescan, not per frame
+- **Capture FPS / Display FPS split** — capture at high FPS (up to 30), display at lower FPS (1–10) for smoother buffering with lower LCD write overhead
+- **Verbose frame logging** — optional `[FRAME]` messages at INFO level for debugging frame flow
 
 ---
 
@@ -291,6 +369,19 @@ Isy's Inventory Manager performs heavy grid-wide inventory scans via a Programma
 ---
 
 ## Changelog
+
+### v1.5.0
+- **Night Vision mode:** New `NightVisionMode` option (requires Desaturate) maps grayscale luminance to a green phosphor gradient (black → green → white-green) baked directly into pixel RGB. Produces proper NV imagery through the color char pipeline.
+- **Independent grayscale resolution:** New `GrayscaleGridResolution` setting allows grayscale mode to run at a different (typically higher) resolution than color mode. Grayscale uses less bandwidth per character, so you can push resolution higher without hitting the same limits.
+- **Capture FPS / Display FPS split:** `CaptureFps` and `DisplayFps` are now independent. Capture at up to 30 FPS while displaying at 1–10 FPS for smoother buffering with lower server-side LCD write overhead.
+- **Dithering modes:** `DitherMode` replaces the old boolean `UseDithering`. Choose `None`, `Bayer` (stable, low flicker), or `FloydSteinberg` (smoother gradients).
+- **Post-processing filters:** `PostProcessMode` and `GridPostProcessMode` apply `LightBlur`, `MediumBlur`, or `Sharpen` pre-filters to single LCD and 2×2 grid independently before character conversion.
+- **Horizontal squash correction:** `HorizontalSquash` and `SingleHorizontalSquash` sliders (0.5–1.5) for per-display-type aspect ratio correction. Values >1.0 compress horizontally to compensate for SE character cell proportions.
+- **Content shift sliders:** `GridContentShift` and `SingleContentShift` (−100 to +100 chars) move the image horizontally on the LCDs. `GridHorizontalOffset` (−30 to +30 cols) closes the horizontal seam between left/right grid panels.
+- **CCTVCapture settings GUI:** Graphical settings form on launch with connection, visual mode, quality, and alignment options. Settings persist to `CCTVCapture.settings.xml`. Pass `--nogui` to skip.
+- **Client preferences sync:** Visual settings (dithering, post-processing, offsets, squash, font tint) are pushed to the server via `CLIENTPREFS` on connect and applied immediately — no server restart needed.
+- **Verbose frame logging:** New `EnableVerboseFrameLogging` option shows `[FRAME]` messages at INFO level for debugging frame flow.
+- **Thread leak fix:** Fixed a critical bug where reconnecting the CCTVCapture client repeatedly would leak send/handler threads on the server, eventually causing a crash. Old threads are now properly stopped and joined before starting new ones.
 
 ### v1.4.0
 - **Crop to Square:** New `CropCaptureToSquare` option (on by default) center-crops the 16:9 SE viewport to 1:1 before resizing, fixing the ~44% horizontal squash that affected all previous builds. SE can run at any normal resolution — no custom 800×800 resolution needed. Toggle off for wider FOV with stretched proportions.

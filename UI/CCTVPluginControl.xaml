@@ -32,7 +32,14 @@
                 <Slider Width="150" Minimum="64" Maximum="700" Value="{Binding LcdGridResolution}"
                         TickFrequency="2" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding LcdGridResolution, StringFormat={}{0}px}" Width="45" Margin="10,0,0,0" VerticalAlignment="Center"/>
-                <TextBlock Text="  (auto-calculated from Grid Font Size)" Foreground="Gray" VerticalAlignment="Center"/>
+                <TextBlock Text="  (color mode resolution)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Grayscale Resolution:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="64" Maximum="700" Value="{Binding GrayscaleGridResolution}"
+                        TickFrequency="2" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding GrayscaleGridResolution, StringFormat={}{0}px}" Width="45" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (grayscale mode — higher res, lower bandwidth)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Capture FPS:" Width="160" VerticalAlignment="Center"/>
@@ -111,7 +118,7 @@
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Font Scale:" Width="160" VerticalAlignment="Center"/>
                 <Slider Width="150" Minimum="0.05" Maximum="2.0" Value="{Binding FontScale}" 
-                        TickFrequency="0.05" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                        TickFrequency="0.01" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding FontScale, StringFormat={}{0:F2}x}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (adjust character size)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
@@ -151,7 +158,7 @@
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Single LCD Font Size:" Width="160" VerticalAlignment="Center"/>
                 <Slider Width="150" Minimum="0.05" Maximum="0.15" Value="{Binding SingleLcdFontSize}" 
-                        TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                        TickFrequency="0.001" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding SingleLcdFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (single panel alignment)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
