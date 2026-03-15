@@ -37,6 +37,8 @@ namespace CCTVPlugin
 		private TcpClient _client;
 		private NetworkStream _stream;
 		private Thread _listenerThread;
+		private Thread _sendThread;
+		private Thread _handlerThread;
 		private volatile bool _isRunning;
 
 		// Per-client camera state
@@ -128,13 +130,14 @@ namespace CCTVPlugin
 		private const int PROXIMITY_CHECK_INTERVAL = 300; // ticks between checks (~5 s at 60 TPS)
 
 		// Cockpit-aware LCD throttle: when a player enters a cockpit on the SAME grid
-		// as a CCTV LCD (dynamic grids only), SE's renderer rebuilds LCD textures
-		// synchronously during the seat transition — stalling the game thread.
+		// (mechanical group) as a CCTV LCD (dynamic grids only), SE's renderer rebuilds
+		// LCD textures synchronously during the seat transition — stalling the game thread.
 		// We pause LCD writes for a short spool-up period after cockpit entry so
 		// SE can finish the transition animation without competing with WriteText calls.
-		private bool _playerInCockpitOnLcdGrid = false;
-		private bool _wasPlayerInCockpitOnLcdGrid = false;
-		private int _cockpitSpoolUpTicksRemaining = 0;
+		// Per-grid tracking: only the vehicle the player sits in activates its LCDs;
+		// other dynamic grids with CCTV LCDs remain dark.
+		private HashSet<long> _gridsWithOccupiedCockpit = new HashSet<long>();
+		private readonly Dictionary<long, int> _gridSpoolUpTicks = new Dictionary<long, int>();
 		private const int COCKPIT_SPOOL_UP_TICKS = 120; // ~2 seconds at 60 TPS
 
 		// Cached cockpit blocks on dynamic grids that have CCTV LCDs (or are
@@ -298,20 +301,50 @@ namespace CCTVPlugin
 			if (!_isRunning)
 				return;
 
+			Log.Info($"🛑 [{Name}] Stop() called — shutting down threads and TCP...");
 			_isRunning = false;
 			_sendEvent.Set(); // wake send thread so it exits
 
-			try
+			// Close TCP resources FIRST so threads blocked on I/O (ReadLine, Write) unblock.
+			try { _stream?.Close(); } catch { }
+			try { _client?.Close(); } catch { }
+			try { _listener?.Stop(); } catch { }
+
+			// Join threads with a timeout so we don't hang on shutdown,
+			// but do give them a chance to exit cleanly before the CLR
+			// tears down kernel objects they may still be touching.
+			const int JOIN_TIMEOUT_MS = 3000;
+
+			if (_handlerThread != null && _handlerThread.IsAlive)
 			{
-				_stream?.Close();
-				_client?.Close();
-				_listener?.Stop();
-				Log.Info($"🛑 [{Name}] TCP listener stopped");
+				if (!_handlerThread.Join(JOIN_TIMEOUT_MS))
+					Log.Warn($"[{Name}] Handler thread did not exit within {JOIN_TIMEOUT_MS}ms");
 			}
-			catch (Exception ex)
+
+			if (_sendThread != null && _sendThread.IsAlive)
 			{
-				Log.Error(ex, $"Error stopping [{Name}] listener");
+				_sendEvent.Set(); // signal again in case the first Set() was consumed before _isRunning was seen
+				if (!_sendThread.Join(JOIN_TIMEOUT_MS))
+					Log.Warn($"[{Name}] Send thread did not exit within {JOIN_TIMEOUT_MS}ms");
 			}
+
+			if (_listenerThread != null && _listenerThread.IsAlive)
+			{
+				if (!_listenerThread.Join(JOIN_TIMEOUT_MS))
+					Log.Warn($"[{Name}] Listener thread did not exit within {JOIN_TIMEOUT_MS}ms");
+			}
+
+			// Dispose the kernel wait handle now that all threads have exited (or timed out).
+			try { _sendEvent.Dispose(); } catch { }
+
+			_handlerThread = null;
+			_sendThread = null;
+			_listenerThread = null;
+			_stream = null;
+			_client = null;
+			_listener = null;
+
+			Log.Info($"🛑 [{Name}] Stop() complete — all resources released");
 		}
 
 		/// <summary>
@@ -693,12 +726,12 @@ namespace CCTVPlugin
 						Log.Info($"✅ [{Name}] CCTVCapture connected from {_client.Client.RemoteEndPoint}");
 
 						// Start background send thread BEFORE any Send() calls
-						Thread sendThread = new Thread(SendWorker)
+						_sendThread = new Thread(SendWorker)
 						{
 							IsBackground = true,
 							Name = $"CCTVCapture-{Name}-Sender"
 						};
-						sendThread.Start();
+						_sendThread.Start();
 
 						// Send welcome message
 						Send($"HELLO {Name} v1.0");
@@ -728,12 +761,12 @@ namespace CCTVPlugin
 						Log.Debug($"[{Name}] Triggering immediate camera rescan for new client");
 
 						// Start handling client messages on a separate thread
-						Thread clientThread = new Thread(HandleClientMessages)
+						_handlerThread = new Thread(HandleClientMessages)
 						{
 							IsBackground = true,
 							Name = $"CCTVCapture-{Name}-Handler"
 						};
-						clientThread.Start();
+						_handlerThread.Start();
 					}
 
 					Thread.Sleep(100);
@@ -841,7 +874,9 @@ namespace CCTVPlugin
 							   $"LcdGridResolution={_sharedConfig.LcdGridResolution} " +
 							   $"DesaturateColorMode={_sharedConfig.DesaturateColorMode} " +
 							   $"NightVisionMode={_sharedConfig.NightVisionMode} " +
-							   $"CropCaptureToSquare={_sharedConfig.CropCaptureToSquare}";
+							   $"CropCaptureToSquare={_sharedConfig.CropCaptureToSquare} " +
+							   $"HorizontalSquash={_sharedConfig.HorizontalSquash.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+								   $"SingleHorizontalSquash={_sharedConfig.SingleHorizontalSquash.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 				Send(config);
 				return;
 			}
@@ -1076,7 +1111,7 @@ namespace CCTVPlugin
 					$"cycle {_cameraCycleTicks}/{_dynamicCycleIntervalTicks}t, " +
 					$"manual={_isManualMode}, autoCycle={_sharedConfig.EnableAutoCameraCycling}, " +
 					$"queue={queueCount}, preTP={_preTeleportSent}, nearby={_anyPlayerNearby}, " +
-					$"cockpit={_playerInCockpitOnLcdGrid}, spool={_cockpitSpoolUpTicksRemaining}, " +
+					$"cockpitGrids={_gridsWithOccupiedCockpit.Count}, spoolGrids={_gridSpoolUpTicks.Count}, " +
 					$"rx={rxSnap}, lcdW={wSingle}+{wGrid}, miss={miss}, eFail={eFail}, " +
 					$"perf: worst={_worstTickMs:F1}ms write={_worstWriteMs:F1}ms prox={_worstProximityMs:F1}ms slow={_slowTickCount}");
 				_worstTickMs = 0; _worstWriteMs = 0; _worstProximityMs = 0; _slowTickCount = 0;
@@ -1184,11 +1219,21 @@ namespace CCTVPlugin
 			bool gridTick = (++_gridDisplayTicks >= _displayFpsInterval);
 			if (gridTick) _gridDisplayTicks = 0;
 
-			// Cockpit spool-up countdown (tick-down only; the gate itself is
-			// applied per-LCD in WriteLCDContent so only dynamic-grid LCDs
-			// pause — static-grid masters and slaves keep streaming).
-			if (_cockpitSpoolUpTicksRemaining > 0)
-				_cockpitSpoolUpTicksRemaining--;
+			// Per-grid cockpit spool-up countdown (the gate itself is applied
+			// per-LCD in WriteLCDContent so only the occupied vehicle's LCDs
+			// pause — static-grid masters and other vehicles keep streaming).
+			if (_gridSpoolUpTicks.Count > 0)
+			{
+				var keys = new List<long>(_gridSpoolUpTicks.Keys);
+				foreach (var key in keys)
+				{
+					int remaining = _gridSpoolUpTicks[key] - 1;
+					if (remaining <= 0)
+						_gridSpoolUpTicks.Remove(key);
+					else
+						_gridSpoolUpTicks[key] = remaining;
+				}
+			}
 
 			bool writesAllowed = _anyPlayerNearby;
 
@@ -1799,17 +1844,22 @@ namespace CCTVPlugin
 					catch { }
 
 					// Per-LCD cockpit gate: dynamic-grid LCDs only update when a player is
-					// seated in a cockpit on that grid AND the spool-up period has elapsed.
-					// This prevents vehicle HUD LCDs from streaming when the cockpit is empty,
-					// and pauses them during the seat transition so SE's renderer can finish
-					// rebuilding LCD textures without competing with WriteText calls.
-					// Static-grid LCDs (base masters + slaves) are NOT affected by spool-up.
-					if (isOnDynamicGrid && (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0))
+					// seated in a cockpit on the SAME grid (mechanical group) AND the
+					// spool-up period has elapsed.  Other vehicles' HUD LCDs stay dark.
+					// Static-grid LCDs (base masters + slaves) are NOT affected.
+					if (isOnDynamicGrid)
+					{
+						long lcdGridId = 0;
+						try { lcdGridId = lcd.CubeGrid.EntityId; } catch { }
+						bool gridOccupied = lcdGridId != 0 && _gridsWithOccupiedCockpit.Contains(lcdGridId);
+						bool spooling = lcdGridId != 0 && _gridSpoolUpTicks.ContainsKey(lcdGridId);
+						if (!gridOccupied || spooling)
 						{
 							if (Log.IsDebugEnabled)
-								Log.Debug($"[{Name}] ⏭️ GATE: blocking dynamic LCD '{lcd.CustomName}' (cockpit={_playerInCockpitOnLcdGrid}, spool={_cockpitSpoolUpTicksRemaining})");
+								Log.Debug($"[{Name}] ⏭️ GATE: blocking dynamic LCD '{lcd.CustomName}' grid={lcdGridId} (occupied={gridOccupied}, spooling={spooling})");
 							return;
 						}
+					}
 
 				int effectiveAlpha = isOnDynamicGrid ? 0 : Math.Max(0, Math.Min(255, _config.LcdBackgroundAlpha));
 
@@ -2012,17 +2062,18 @@ namespace CCTVPlugin
 					{
 						try
 						{
-							// Skip slave LCDs on dynamic grids when cockpit is empty or spooling
-							if (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0)
+							// Skip slave LCDs on dynamic grids unless their grid has an occupied cockpit (past spool-up)
+							try
 							{
-								try
+								var slaveGrid = slaveLcd.CubeGrid;
+								if (slaveGrid != null && !slaveGrid.IsStatic)
 								{
-									var slaveGrid = slaveLcd.CubeGrid;
-									if (slaveGrid != null && !slaveGrid.IsStatic)
+									long sgId = slaveGrid.EntityId;
+									if (!_gridsWithOccupiedCockpit.Contains(sgId) || _gridSpoolUpTicks.ContainsKey(sgId))
 										continue;
 								}
-								catch { }
 							}
+							catch { }
 
 							slaveLcd.WriteText(_slaveSb);
 							slaveLcd.ContentType = masterLcd.ContentType;
@@ -2060,21 +2111,22 @@ namespace CCTVPlugin
 						{
 							try
 							{
-								// Skip slave LCDs on dynamic grids when cockpit is empty or spooling
-								if (!_playerInCockpitOnLcdGrid || _cockpitSpoolUpTicksRemaining > 0)
-								{
+								// Skip slave LCDs on dynamic grids unless their grid has an occupied cockpit (past spool-up)
 									try
 									{
 										var slaveGrid = slaveLcd.CubeGrid;
 										if (slaveGrid != null && !slaveGrid.IsStatic)
-											continue;
+										{
+											long sgId = slaveGrid.EntityId;
+											if (!_gridsWithOccupiedCockpit.Contains(sgId) || _gridSpoolUpTicks.ContainsKey(sgId))
+												continue;
+										}
 									}
 									catch { }
-								}
 
-								slaveLcd.WriteText(_slaveSb);
-								slaveLcd.ContentType = singleMasterLcd.ContentType;
-								slaveLcd.Font = singleMasterLcd.Font;
+									slaveLcd.WriteText(_slaveSb);
+									slaveLcd.ContentType = singleMasterLcd.ContentType;
+									slaveLcd.Font = singleMasterLcd.Font;
 								slaveLcd.FontSize = singleMasterLcd.FontSize;
 								slaveLcd.FontColor = singleMasterLcd.FontColor;
 								slaveLcd.BackgroundColor = singleMasterLcd.BackgroundColor;
@@ -2234,7 +2286,8 @@ namespace CCTVPlugin
 			if (radius <= 0f)
 			{
 				_anyPlayerNearby = true;
-				_playerInCockpitOnLcdGrid = false;
+				_gridsWithOccupiedCockpit.Clear();
+				_gridSpoolUpTicks.Clear();
 				return;
 			}
 
@@ -2295,12 +2348,12 @@ namespace CCTVPlugin
 				return;
 			}
 
-			// ── Cockpit detection (O(few)) ──────────────────────────────
+			// ── Cockpit detection (O(few)) — per-grid tracking ─────────
 			// Rebuild only when we have dynamic grids to scan AND the cache is dirty.
 			// When _lcdCache maps a shared LCD name to the static-grid panel, dynamicLcdGrids
 			// will be empty — but the cockpit block refs from a previous rebuild are still
 			// valid, so we check them regardless.
-			bool foundInCockpit = false;
+			var newOccupiedGridIds = new HashSet<long>();
 
 			if (dynamicLcdGrids.Count > 0 && (_cockpitCacheDirty || _cockpitCache == null))
 				RebuildCockpitCache(dynamicLcdGrids);
@@ -2312,11 +2365,35 @@ namespace CCTVPlugin
 					try
 					{
 						if (cockpit.MarkedForClose) { _cockpitCacheDirty = true; continue; }
-						if (cockpit.Pilot != null) { foundInCockpit = true; break; }
+						if (cockpit.Pilot != null)
+						{
+							// Add all grid IDs in this cockpit's mechanical group so LCDs
+							// on subgrids (rotors/pistons/hinges) also activate.
+							try
+							{
+								var connectedGrids = new List<IMyCubeGrid>();
+								var group = ((IMyCubeGrid)cockpit.CubeGrid).GetGridGroup(GridLinkTypeEnum.Mechanical);
+								if (group != null)
+									group.GetGrids(connectedGrids);
+								else
+									connectedGrids.Add(cockpit.CubeGrid);
+								foreach (var cg in connectedGrids)
+									if (cg != null && !cg.MarkedForClose)
+										newOccupiedGridIds.Add(cg.EntityId);
+							}
+							catch
+							{
+								// Fallback: at least mark the cockpit's own grid
+								if (cockpit.CubeGrid != null)
+									newOccupiedGridIds.Add(cockpit.CubeGrid.EntityId);
+							}
+						}
 					}
 					catch { _cockpitCacheDirty = true; }
 				}
 			}
+
+			bool foundInCockpit = newOccupiedGridIds.Count > 0;
 
 			// ── Static-grid player proximity check ────────────────────────
 			bool foundNearby = false;
@@ -2344,26 +2421,34 @@ namespace CCTVPlugin
 
 			if (Log.IsDebugEnabled)
 				Log.Debug($"[{Name}] 🔍 ProxCheck: staticLcds={staticLcdPositions.Count}, dynGrids={dynamicLcdGrids.Count}, " +
-					$"nearby={foundNearby}, cockpit={foundInCockpit}, cockpits={_cockpitCache?.Count ?? 0}");
+					$"nearby={foundNearby}, cockpitGrids={newOccupiedGridIds.Count}, cockpits={_cockpitCache?.Count ?? 0}");
 
-			// Cockpit entry/exit state changes
-			if (foundInCockpit && !_playerInCockpitOnLcdGrid)
+			// Per-grid cockpit entry/exit state changes
+			// Grids that newly gained an occupant → start spool-up
+			foreach (var gridId in newOccupiedGridIds)
 			{
-				_cockpitSpoolUpTicksRemaining = COCKPIT_SPOOL_UP_TICKS;
-				Log.Info($"[{Name}] 🪑 Player entered cockpit on CCTV LCD grid — pausing writes for {COCKPIT_SPOOL_UP_TICKS / 60f:F1}s spool-up");
+				if (!_gridsWithOccupiedCockpit.Contains(gridId))
+				{
+					_gridSpoolUpTicks[gridId] = COCKPIT_SPOOL_UP_TICKS;
+					Log.Info($"[{Name}] 🪑 Player entered cockpit on grid {gridId} — pausing writes for {COCKPIT_SPOOL_UP_TICKS / 60f:F1}s spool-up");
+				}
 			}
-			else if (!foundInCockpit && _playerInCockpitOnLcdGrid)
+			// Grids that lost their occupant → blank their LCDs
+			foreach (var gridId in _gridsWithOccupiedCockpit)
 			{
-				Log.Info($"[{Name}] 🪑 Player left cockpit on CCTV LCD grid — blanking dynamic-grid LCDs");
-				_cockpitSpoolUpTicksRemaining = 0;
-				BlankDynamicGridLcds();
+				if (!newOccupiedGridIds.Contains(gridId))
+				{
+					_gridSpoolUpTicks.Remove(gridId);
+					Log.Info($"[{Name}] 🪑 Player left cockpit on grid {gridId} — blanking its LCDs");
+					BlankDynamicGridLcdsOnGrids(new HashSet<long> { gridId });
+				}
 			}
-			_playerInCockpitOnLcdGrid = foundInCockpit;
+			_gridsWithOccupiedCockpit = newOccupiedGridIds;
 
 			if (_anyPlayerNearby != _wasPlayerNearby)
 			{
 				Log.Info(_anyPlayerNearby
-					? $"[{Name}] 👁️ Player detected (nearby={foundNearby}, cockpit={foundInCockpit}) - resuming LCD stream"
+					? $"[{Name}] 👁️ Player detected (nearby={foundNearby}, cockpitGrids={newOccupiedGridIds.Count}) - resuming LCD stream"
 					: $"[{Name}] 💤 No players nearby or in cockpit — pausing LCD stream");
 				_wasPlayerNearby = _anyPlayerNearby;
 			}
@@ -2421,13 +2506,14 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Blanks all cached LCDs that live on dynamic (non-static) grids by switching
-		/// their ContentType to NONE.  Called once when the last player leaves a cockpit
-		/// on a dynamic CCTV grid so the screen goes dark instead of showing a stale frame.
+		/// Blanks cached LCDs that live on the specified dynamic grids by switching
+		/// their ContentType to NONE.  Called when a player leaves a cockpit on a
+		/// specific grid so only that vehicle's screens go dark — other vehicles
+		/// with occupied cockpits keep streaming.
 		/// The normal WriteLCDContent path restores TEXT_AND_IMAGE on the next write.
 		/// Must be called from the game thread.
 		/// </summary>
-		private void BlankDynamicGridLcds()
+		private void BlankDynamicGridLcdsOnGrids(HashSet<long> gridIds)
 		{
 			int blanked = 0;
 
@@ -2440,6 +2526,7 @@ namespace CCTVPlugin
 					if (lcd == null) continue;
 					var cubeGrid = lcd.CubeGrid;
 					if (cubeGrid == null || cubeGrid.MarkedForClose || cubeGrid.IsStatic) continue;
+					if (!gridIds.Contains(cubeGrid.EntityId)) continue;
 
 					lcd.WriteText("");
 					lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.NONE;
@@ -2459,6 +2546,7 @@ namespace CCTVPlugin
 						{
 							var slaveGrid = slaveLcd.CubeGrid;
 							if (slaveGrid == null || slaveGrid.MarkedForClose || slaveGrid.IsStatic) continue;
+							if (!gridIds.Contains(slaveGrid.EntityId)) continue;
 
 							slaveLcd.WriteText("");
 							slaveLcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.NONE;
@@ -2470,7 +2558,7 @@ namespace CCTVPlugin
 			}
 
 			if (blanked > 0)
-				Log.Info($"[{Name}] 🔲 Blanked {blanked} dynamic-grid LCD(s) (masters + slaves)");
+				Log.Info($"[{Name}] 🔲 Blanked {blanked} dynamic-grid LCD(s) on {gridIds.Count} grid(s)");
 		}
 
 		/// <summary>

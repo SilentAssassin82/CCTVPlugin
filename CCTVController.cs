@@ -64,6 +64,7 @@ namespace CCTVPlugin
         private readonly List<CCTVClientConnection> _clientConnections = new List<CCTVClientConnection>();
 
         private bool _initialized = false;
+        private volatile bool _disposed = false;
         private int _scanTicks = 0;
         private int _heartbeatTicks = 0;
         private int _cameraCycleTicks = 0;
@@ -241,7 +242,7 @@ namespace CCTVPlugin
 
             try
             {
-                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution} DesaturateColorMode={_config.DesaturateColorMode} NightVisionMode={_config.NightVisionMode} CropCaptureToSquare={_config.CropCaptureToSquare}";
+                string message = $"CONFIG LcdFontTint={_lcdFontTint} CaptureWidth={_config.CaptureWidth} CaptureHeight={_config.CaptureHeight} CaptureFps={_captureFps} UseColorMode={_useColorMode} UseDithering={_useDithering} DitherMode={_config.DitherMode} PostProcessMode={_config.PostProcessMode} GridPostProcessMode={_config.GridPostProcessMode} LcdGridResolution={_config.LcdGridResolution} DesaturateColorMode={_config.DesaturateColorMode} NightVisionMode={_config.NightVisionMode} CropCaptureToSquare={_config.CropCaptureToSquare} HorizontalSquash={_config.HorizontalSquash.ToString(System.Globalization.CultureInfo.InvariantCulture)} SingleHorizontalSquash={_config.SingleHorizontalSquash.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
                 Send(message);
                 Log.Info($"Sent CONFIG to fake client: {_config.CaptureWidth}x{_config.CaptureHeight} @{_captureFps}fps color={_useColorMode} dither={_config.DitherMode} postproc={_config.PostProcessMode} gridPostProc={_config.GridPostProcessMode}");
             }
@@ -560,11 +561,21 @@ namespace CCTVPlugin
 
         private void OnClientConnected(IAsyncResult ar)
         {
+            // Guard: if Dispose() has already run, the listener is gone.
+            // EndAcceptTcpClient on a stopped listener throws ObjectDisposedException;
+            // catching it here prevents the callback from touching freed resources.
+            if (_disposed) return;
+
             TcpClient newClient = null;
 
             try
             {
                 newClient = _listener.EndAcceptTcpClient(ar);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Listener was stopped during Dispose() — expected, just exit.
+                return;
             }
             catch (Exception ex)
             {
@@ -594,14 +605,18 @@ namespace CCTVPlugin
                 _currentCameraIndex = 0;
             }
 
-            // Accept next connection attempt
-            try
+            // Accept next connection attempt (skip if we're shutting down)
+            if (!_disposed)
             {
-                _listener?.BeginAcceptTcpClient(OnClientConnected, null);
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Failed to begin accepting next client");
+                try
+                {
+                    _listener?.BeginAcceptTcpClient(OnClientConnected, null);
+                }
+                catch (ObjectDisposedException) { /* listener stopped during Dispose() */ }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Failed to begin accepting next client");
+                }
             }
         }
 
@@ -2656,6 +2671,28 @@ namespace CCTVPlugin
         public void Dispose()
         {
             Log.Info("CCTVPlugin: Disposing");
+            _disposed = true;
+
+            // Stop listeners FIRST so no new async callbacks fire during cleanup.
+            try
+            {
+                _listener?.Stop();
+                _listener = null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error stopping listener");
+            }
+
+            try
+            {
+                _modListener?.Stop();
+                _modListener = null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error stopping mod listener");
+            }
 
             if (_ctrlHandlerRegistered)
             {
@@ -2681,26 +2718,6 @@ namespace CCTVPlugin
 
             CleanupClient();
             CleanupModClient();
-
-            try
-            {
-                _listener?.Stop();
-                _listener = null;
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Error stopping listener");
-            }
-
-            try
-            {
-                _modListener?.Stop();
-                _modListener = null;
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Error stopping mod listener");
-            }
         }
 
         private class BufferedFrame

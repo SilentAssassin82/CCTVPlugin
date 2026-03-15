@@ -65,6 +65,13 @@
                 <TextBlock Text="  (correct proportions; off = wider FOV, stretched)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Grid Horiz. Squash:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="0.5" Maximum="1.5" Value="{Binding HorizontalSquash}"
+                        TickFrequency="0.01" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding HorizontalSquash, StringFormat={}{0:F2}x}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (&gt;1.0 compresses horizontally for 2×2 grid)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Dithering:" Width="160" VerticalAlignment="Center"/>
                 <ComboBox Width="150" SelectedValue="{Binding DitherMode}" SelectedValuePath="Content" VerticalAlignment="Center">
                     <ComboBoxItem Content="None"/>
@@ -147,6 +154,13 @@
                         TickFrequency="0.005" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding SingleLcdFontSize, StringFormat={}{0:F3}}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
                 <TextBlock Text="  (single panel alignment)" Foreground="Gray" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                <TextBlock Text="Single Horiz. Squash:" Width="160" VerticalAlignment="Center"/>
+                <Slider Width="150" Minimum="0.5" Maximum="1.5" Value="{Binding SingleHorizontalSquash}"
+                        TickFrequency="0.01" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding SingleHorizontalSquash, StringFormat={}{0:F2}x}" Width="50" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                <TextBlock Text="  (&gt;1.0 compresses horizontally for single LCD)" Foreground="Gray" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                 <TextBlock Text="Single Content Shift:" Width="160" VerticalAlignment="Center"/>

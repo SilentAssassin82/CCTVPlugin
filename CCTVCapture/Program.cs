@@ -33,6 +33,8 @@ namespace CCTVCapture
         private static bool _desaturateColorMode = false;
         private static bool _nightVisionMode = false;
         private static bool _cropToSquare = true;
+        private static float _horizontalSquash = 1.0f;
+        private static float _singleHorizontalSquash = 1.0f;
 
         // Track current camera's LCD setup (for dual-resolution rendering)
         private static bool _currentCameraHasSingleLcd = false;
@@ -559,6 +561,14 @@ namespace CCTVCapture
                             if (bool.TryParse(val, out bool crop))
                                 _cropToSquare = crop;
                             break;
+                        case "HorizontalSquash":
+                            if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float hsquash))
+                                _horizontalSquash = hsquash;
+                            break;
+                        case "SingleHorizontalSquash":
+                            if (float.TryParse(val, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float shsquash))
+                                _singleHorizontalSquash = shsquash;
+                            break;
                     }
                 }
 
@@ -581,7 +591,10 @@ namespace CCTVCapture
                 if (_verboseLogging)
                     Console.WriteLine("[DEBUG] Capturing screen...");
 
-                Bitmap capture = ScreenCapture.CaptureGameViewport(_captureWidth, _captureHeight, _cropToSquare);
+                // Capture with the wider of the two squash values so both LCD types
+                // have enough horizontal content.  Per-LCD compensation is applied below.
+                float maxSquash = Math.Max(_horizontalSquash, _singleHorizontalSquash);
+                Bitmap capture = ScreenCapture.CaptureGameViewport(_captureWidth, _captureHeight, _cropToSquare, maxSquash);
 
                 if (capture == null)
                 {
@@ -620,7 +633,11 @@ namespace CCTVCapture
 
                 if (_currentCameraHasSingleLcd)
                 {
-                    Bitmap resized = new Bitmap(capture, _lcdSingleRes, _lcdSingleRes);
+                    // Compensate: capture has maxSquash baked in, single LCD wants _singleHorizontalSquash.
+                    // Making the bitmap narrower lets the converter stretch undo the excess squash.
+                    float singleComp = (maxSquash > 0f) ? (_singleHorizontalSquash / maxSquash) : 1f;
+                    int singleW = Math.Max(1, (int)(_lcdSingleRes * singleComp));
+                    Bitmap resized = new Bitmap(capture, singleW, _lcdSingleRes);
                     if (_postProcessMode != CCTVCommon.PostProcessMode.None)
                     {
                         singleFrame = AsciiConverter.ApplyPostProcess(resized, _postProcessMode);
@@ -636,7 +653,10 @@ namespace CCTVCapture
 
                 if (_currentCameraHasGrid)
                 {
-                    Bitmap resized = new Bitmap(capture, _lcdGridRes, _lcdGridRes);
+                    // Compensate: capture has maxSquash, grid wants _horizontalSquash.
+                    float gridComp = (maxSquash > 0f) ? (_horizontalSquash / maxSquash) : 1f;
+                    int gridW = Math.Max(1, (int)(_lcdGridRes * gridComp));
+                    Bitmap resized = new Bitmap(capture, gridW, _lcdGridRes);
                     if (_gridPostProcessMode != CCTVCommon.PostProcessMode.None)
                     {
                         gridFrame = AsciiConverter.ApplyPostProcess(resized, _gridPostProcessMode);

@@ -37,15 +37,17 @@ namespace CCTVPlugin
         private int _gridContentShift = 0;
         private int _gridVerticalOffset = 5;   // default overlap to close vertical seam
         private int _gridHorizontalOffset = 0;
-        private float _singleLcdFontSize = 0.080f;
+        private float _singleLcdFontSize = 0.1f;
         private int _singleContentShift = 0;
         private float _proximityCheckRadius = 150f;
         private int _lcdGridResolution = 362;
         private bool _desaturateColorMode = false;
         private bool _nightVisionMode = false;
         private bool _cropCaptureToSquare = true;
+        private float _horizontalSquash = 1.0f;
+            private float _singleHorizontalSquash = 1.0f;
 
-        // Suppresses ValidateFpsRatio during XML deserialization so property
+            // Suppresses ValidateFpsRatio
         // setters don't fire against stale default values before all elements
         // have been loaded.  Set to true by Load() after deserialization.
         private bool _loaded = false;
@@ -274,6 +276,41 @@ namespace CCTVPlugin
             set
             {
                 _cropCaptureToSquare = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Horizontal aspect-ratio correction for LCD display.
+        /// Values > 1.0 capture a wider area and compress it into the same grid,
+        /// squashing the image horizontally. Values &lt; 1.0 stretch horizontally.
+        /// Use this to compensate for SE LCD character cells not being perfectly square.
+        /// Range: 0.5–1.5. Default: 1.0 (no correction).
+        /// </summary>
+        [XmlElement("HorizontalSquash")]
+        public float HorizontalSquash
+        {
+            get => _horizontalSquash;
+            set
+            {
+                _horizontalSquash = Math.Max(0.5f, Math.Min(1.5f, value));
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Horizontal aspect-ratio correction for single LCD panels.
+        /// Independent of HorizontalSquash so each display type can be tuned separately.
+        /// Values > 1.0 compress horizontally; values &lt; 1.0 stretch horizontally.
+        /// Range: 0.5–1.5. Default: 1.0 (no correction).
+        /// </summary>
+        [XmlElement("SingleHorizontalSquash")]
+        public float SingleHorizontalSquash
+        {
+            get => _singleHorizontalSquash;
+            set
+            {
+                _singleHorizontalSquash = Math.Max(0.5f, Math.Min(1.5f, value));
                 OnPropertyChanged();
             }
         }
@@ -633,6 +670,17 @@ namespace CCTVPlugin
                         var config = (CCTVPluginConfig)serializer.Deserialize(reader);
                             config._loaded = true;
                             config.ValidateFpsRatio();
+
+                            // Re-sync font sizes from the grid resolution to fix
+                            // deserialization order race: XmlSerializer may set
+                            // SingleLcdFontSize AFTER LcdGridResolution, overwriting
+                            // the auto-synced value with a stale XML element.
+                            int charsPerPanel = config._lcdGridResolution / 2;
+                            float correctFont = FONT_RESOLUTION_CONSTANT / charsPerPanel;
+                            correctFont = Math.Max(0.05f, Math.Min(0.2f, correctFont));
+                            config._singleLcdFontSize = correctFont;
+                            config._gridFontSize = correctFont;
+
                             Log.Info($"Loaded config from {path}");
                             return config;
                     }

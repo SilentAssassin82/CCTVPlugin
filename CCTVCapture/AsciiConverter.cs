@@ -141,6 +141,14 @@ namespace CCTVCapture
         private static readonly float[] WHIP_DENSITY =
             { 0.00f, 0.04f, 0.10f, 0.15f, 0.25f, 0.35f, 0.45f, 0.55f, 0.65f, 0.78f, 0.92f };
 
+        // LUT: raw grayscale byte → gamma-lifted + contrast-boosted byte.
+        // Applies the same shadow lift as the grayscale ASCII paths but outputs
+        // back to 0–255 for the color char encoder to read.  Used inside
+        // DesaturateBitmap so NV / desaturated frames benefit from the high-gain
+        // lift before 3-bit colour quantisation (safe because the image is already
+        // monochrome — no blocky colour artifacts).
+        private static readonly byte[] _grayLiftLUT = BuildGrayLiftLUT();
+
         // LUT: raw grayscale byte [0-255] → density-linearized float [0,1].
         // Folds gamma lift, contrast boost, and density-curve linearisation into a
         // single table.  In the output space each WHIP_RAMP character occupies an
@@ -173,6 +181,19 @@ namespace CCTVCapture
                 }
             }
             return 1f;
+        }
+
+        private static byte[] BuildGrayLiftLUT()
+        {
+            byte[] lut = new byte[256];
+            for (int i = 0; i < 256; i++)
+            {
+                float lv = (float)Math.Pow(i / 255f, GRAYSCALE_GAMMA);
+                lv = (lv - CONTRAST_MIDPOINT) * CONTRAST + CONTRAST_MIDPOINT;
+                lv = lv < 0f ? 0f : (lv > 1f ? 1f : lv);
+                lut[i] = (byte)(lv * 255f + 0.5f);
+            }
+            return lut;
         }
 
         private static float[] BuildGrayToLinearLUT()
@@ -242,6 +263,11 @@ namespace CCTVCapture
                     int idx = rowOffset + x * 3;
                     // Format24bppRgb is BGR order
                     byte gray = (byte)(pixels[idx + 2] * 0.299f + pixels[idx + 1] * 0.587f + pixels[idx] * 0.114f);
+
+                    // High-gain lift: same gamma + contrast as grayscale ASCII paths.
+                    // Safe here because the image is already monochrome (neutral gray
+                    // or NV green) so the boost won't produce blocky colour artifacts.
+                    gray = _grayLiftLUT[gray];
 
                     if (nightVision)
                     {

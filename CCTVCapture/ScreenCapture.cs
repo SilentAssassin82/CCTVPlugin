@@ -88,7 +88,7 @@ namespace CCTVCapture
         /// <summary>
         /// Captures the center portion of the Space Engineers window (viewport area)
         /// </summary>
-        public static Bitmap CaptureGameViewport(int targetWidth, int targetHeight, bool cropToSquare = true)
+        public static Bitmap CaptureGameViewport(int targetWidth, int targetHeight, bool cropToSquare = true, float horizontalSquash = 1.0f)
         {
             var window = FindSpaceEngineersWindow();
             if (!window.HasValue)
@@ -122,22 +122,26 @@ namespace CCTVCapture
                 // Crop to square (center crop) before resizing so a 16:9 source
                 // isn't squashed into a 1:1 target.  This lets SE run at a normal
                 // resolution without aspect-ratio distortion on the LCD output.
-                int cropSize = Math.Min(captureWidth, captureHeight);
-                int cropX = (captureWidth - cropSize) / 2;
-                int cropY = (captureHeight - cropSize) / 2;
+                // HorizontalSquash > 1.0 widens the crop rectangle to grab more horizontal
+                // content, which gets squeezed into the square target — compensating for
+                // SE LCD color chars being slightly wider than tall.
+                int cropHeight = Math.Min(captureWidth, captureHeight);
+                int cropWidth = Math.Min((int)(cropHeight * horizontalSquash), captureWidth);
+                int cropX = (captureWidth - cropWidth) / 2;
+                int cropY = (captureHeight - cropHeight) / 2;
 
-                Bitmap cropped = new Bitmap(cropSize, cropSize);
+                Bitmap cropped = new Bitmap(cropWidth, cropHeight);
                 using (Graphics g = Graphics.FromImage(cropped))
                 {
                     g.DrawImage(fullCapture,
-                        new Rectangle(0, 0, cropSize, cropSize),
-                        new Rectangle(cropX, cropY, cropSize, cropSize),
+                        new Rectangle(0, 0, cropWidth, cropHeight),
+                        new Rectangle(cropX, cropY, cropWidth, cropHeight),
                         GraphicsUnit.Pixel);
                 }
                 fullCapture.Dispose();
 
-                // Resize cropped square to target dimensions
-                if (cropSize != targetWidth || cropSize != targetHeight)
+                // Resize cropped region to target dimensions
+                if (cropWidth != targetWidth || cropHeight != targetHeight)
                 {
                     Bitmap resized = new Bitmap(targetWidth, targetHeight);
                     using (Graphics g = Graphics.FromImage(resized))
