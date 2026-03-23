@@ -398,19 +398,21 @@ Isy's Inventory Manager performs heavy grid-wide inventory scans via a Programma
 
 ### Previous
 - **Fix — loop switch cameras stopping after a while:** When switching loops (e.g. L1 → L2) the settle-time EWMA and observation counter are now reset so the new loop's auto-cycle interval adapts fresh from its 3-second conservative default instead of inheriting a potentially extended value tuned for the previous loop's camera positions.
-
-## Further reading
-
-- "Ditherpunk" — Surma's article on creative dithering techniques: https://surma.dev/things/ditherpunk/
-- High‑Gain LUT / image enhancement (night‑vision techniques): https://pmc.ncbi.nlm.nih.gov/articles/PMC11507526/
 - **Fix — missed teleport after rescan during loop cycling:** Stale pre-teleport state (`_preTeleportSent` / `_nextCameraIndexForPreTP`) is now cleared whenever a periodic rescan rebuilds the camera list. Previously, if a rescan fired between a pre-emptive GOTO and the actual display switch, the cycle could incorrectly treat the TP as already sent and skip it — leaving the spectator at the wrong camera.
 - **Fix — grayscale dithering crash on bright scenes:** `ConvertToAsciiDithered` used `RICH_RAMP.Length - 1` (= 9) to compute and clamp the character index, then indexed into `BLOCK_RAMP` which only has 5 elements. Any frame with a pixel brighter than ~44% grey caused an `IndexOutOfRangeException`, silently killing the async frame task and halting LCD updates. Index arithmetic now uses `BLOCK_RAMP.Length - 1` throughout.
 - **Color dithering strength restored to 1.0:** `DITHER_STRENGTH` in `ConvertToColorCharsDithered` is `1.0f` (full Floyd-Steinberg error propagation) for best overall image quality on SE's 8-level palette. The previous 0.75 reduction suppressed rainbow fringing on hard colour edges at the cost of visible banding; full strength is the better trade-off.
 
 ---
 
+## Further reading
+
+- "Ditherpunk" — Surma's article on creative dithering techniques: https://surma.dev/things/ditherpunk/
+- High‑Gain LUT / image enhancement (night‑vision techniques): https://pmc.ncbi.nlm.nih.gov/articles/PMC11507526/
+
+---
+
 ## Credits
 
 Inspired by **[Whip's Image Converter](https://steamcommunity.com/sharedfiles/filedetails/?id=323396946)** by Whiplash141. Whip's work on converting images to SE LCD character art — and in particular his research into the 0xE100 hidden color palette — provided both the inspiration for this system and the foundation for achieving the color quality it has.
-
+Tooling - GitHub Copilot — assisted in repository edits and contributor documentation.
 ---
