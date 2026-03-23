@@ -152,6 +152,11 @@ namespace CCTVPlugin
 		private List<Sandbox.Game.Entities.MyCockpit> _cockpitCache;
 		private bool _cockpitCacheDirty = true;
 
+		// Per-grid antenna coverage tracking — populated by CheckAntennasCoverage()
+		// every 5 seconds. Only slave LCD grids in this set have active antenna
+		// infrastructure and can receive the stream. Out-of-range grids go dark.
+		private HashSet<long> _slaveGridsWithAntennaCoverage = new HashSet<long>();
+
 		// Display FPS throttling: single and grid writes are staggered onto
 		// separate ticks so they never coincide, halving per-tick LCD work.
 		private int _singleDisplayTicks = 0;
@@ -1972,6 +1977,22 @@ namespace CCTVPlugin
 						}
 					}
 
+					// Per-grid antenna gate: slave LCDs only write when their grid has antenna
+					// coverage (broadcasting antenna on grid or mechanical group + in range of master).
+					// Master LCD (on static grid) is exempt from this check.
+					// Updated every 5 seconds by CheckAntennasCoverage().
+					long gridId = 0;
+					try { gridId = lcd.CubeGrid.EntityId; } catch { }
+					if (gridId != 0 && !lcd.CubeGrid.IsStatic && _slaveGridsWithAntennaCoverage.Count > 0)
+					{
+						if (!_slaveGridsWithAntennaCoverage.Contains(gridId))
+						{
+							if (Log.IsDebugEnabled)
+								Log.Debug($"[{Name}] ⏭️ GATE: blocking slave LCD '{lcd.CustomName}' grid={gridId} (no antenna coverage)");
+							return;
+						}
+					}
+
 				int effectiveAlpha = isOnDynamicGrid ? 0 : Math.Max(0, Math.Min(255, _config.LcdBackgroundAlpha));
 
 				if (Log.IsDebugEnabled && isOnDynamicGrid)
@@ -2186,6 +2207,23 @@ namespace CCTVPlugin
 							}
 							catch { }
 
+							// Per-grid antenna gate: skip slave LCDs on grids without antenna coverage
+							try
+							{
+								var slaveGrid = slaveLcd.CubeGrid;
+								if (slaveGrid != null && !slaveGrid.IsStatic && _slaveGridsWithAntennaCoverage.Count > 0)
+								{
+									long sgId = slaveGrid.EntityId;
+									if (!_slaveGridsWithAntennaCoverage.Contains(sgId))
+									{
+										if (Log.IsDebugEnabled)
+											Log.Debug($"[{Name}] ⏭️ GATE: skipping slave '{slaveLcd.CustomName}' grid={sgId} (no antenna coverage)");
+										continue;
+									}
+								}
+							}
+							catch { }
+
 							slaveLcd.WriteText(_slaveSb);
 							slaveLcd.ContentType = masterLcd.ContentType;
 							slaveLcd.Font = masterLcd.Font;
@@ -2231,6 +2269,23 @@ namespace CCTVPlugin
 											long sgId = slaveGrid.EntityId;
 											if (!_gridsWithOccupiedCockpit.Contains(sgId) || _gridSpoolUpTicks.ContainsKey(sgId))
 												continue;
+										}
+									}
+									catch { }
+
+									// Per-grid antenna gate: skip slave LCDs on grids without antenna coverage
+									try
+									{
+										var slaveGrid = slaveLcd.CubeGrid;
+										if (slaveGrid != null && !slaveGrid.IsStatic && _slaveGridsWithAntennaCoverage.Count > 0)
+										{
+											long sgId = slaveGrid.EntityId;
+											if (!_slaveGridsWithAntennaCoverage.Contains(sgId))
+											{
+												if (Log.IsDebugEnabled)
+													Log.Debug($"[{Name}] ⏭️ GATE: skipping single slave '{slaveLcd.CustomName}' grid={sgId} (no antenna coverage)");
+												continue;
+											}
 										}
 									}
 									catch { }
@@ -2528,11 +2583,24 @@ namespace CCTVPlugin
 				}
 			}
 
-			_anyPlayerNearby = foundNearby || foundInCockpit;
+			// ── Antenna coverage check: require BOTH master AND slave antennas ──
+			// Block streaming entirely when master or slave grids lack functional+enabled+broadcasting antennas in range.
+			bool antennasOk = CheckAntennasCoverage();
+
+			// Final gate: require (player nearby OR cockpit) AND antenna coverage
+			_anyPlayerNearby = (foundNearby || foundInCockpit) && antennasOk;
+
+			// If antennas block, clear cockpit presence so we don't trigger spool-up
+			if (!antennasOk && foundInCockpit)
+			{
+				Log.Info($"[{Name}] 🔕 Cockpit detected but no antenna coverage — blocking stream");
+				newOccupiedGridIds.Clear();
+				foundInCockpit = false;
+			}
 
 			if (Log.IsDebugEnabled)
 				Log.Debug($"[{Name}] 🔍 ProxCheck: staticLcds={staticLcdPositions.Count}, dynGrids={dynamicLcdGrids.Count}, " +
-					$"nearby={foundNearby}, cockpitGrids={newOccupiedGridIds.Count}, cockpits={_cockpitCache?.Count ?? 0}");
+					$"nearby={foundNearby}, cockpitGrids={newOccupiedGridIds.Count}, cockpits={_cockpitCache?.Count ?? 0}, antennasOk={antennasOk}");
 
 			// Per-grid cockpit entry/exit state changes
 			// Grids that newly gained an occupant → start spool-up
@@ -2562,6 +2630,226 @@ namespace CCTVPlugin
 					? $"[{Name}] 👁️ Player detected (nearby={foundNearby}, cockpitGrids={newOccupiedGridIds.Count}) - resuming LCD stream"
 					: $"[{Name}] 💤 No players nearby or in cockpit — pausing LCD stream");
 				_wasPlayerNearby = _anyPlayerNearby;
+			}
+		}
+
+		/// <summary>
+		/// Checks whether both master AND slave grids have functional+enabled+broadcasting antennas
+		/// that are within range of each other. Returns false if coverage is insufficient.
+		/// Direct ModAPI property access for SE 1.208.15 (Torch 1.3.1.336-master).
+		/// </summary>
+		private bool CheckAntennasCoverage()
+		{
+			try
+			{
+				if (_cachedSlavesByQuad == null || _cachedSlavesByQuad.Count == 0)
+				{
+					Log.Info($"[{Name}] 🔍 Antenna check: No slave LCDs found (_cachedSlavesByQuad={((_cachedSlavesByQuad == null) ? "null" : "empty")}) — allowing stream");
+					return true; // No slaves = no antenna requirement
+				}
+
+				// Scan master grids
+				var masterAnts = new List<(Vector3D pos, float radius, long gridId)>();
+				var masterGridsSeen = new HashSet<long>();
+
+				foreach (var kvp in _lcdCache)
+				{
+					try
+					{
+						var lcd = kvp.Value;
+						if (lcd?.CubeGrid == null) continue;
+						var baseGrid = lcd.CubeGrid as MyCubeGrid;
+						if (baseGrid == null || baseGrid.MarkedForClose) continue;
+
+						var gridsToCheck = new List<IMyCubeGrid>();
+						try
+						{
+							var group = ((IMyCubeGrid)baseGrid).GetGridGroup(GridLinkTypeEnum.Mechanical);
+							if (group != null) group.GetGrids(gridsToCheck);
+							else gridsToCheck.Add(baseGrid);
+						}
+						catch { gridsToCheck.Add(baseGrid); }
+
+						foreach (var g in gridsToCheck)
+						{
+							var mcg = g as MyCubeGrid;
+							if (mcg == null || mcg.MarkedForClose) continue;
+							if (!masterGridsSeen.Add(mcg.EntityId)) continue;
+
+							foreach (var block in mcg.GetFatBlocks())
+							{
+								var ant = block as IMyRadioAntenna;
+								if (ant == null) continue;
+
+								// Direct ModAPI property access (SE 1.208.15)
+								if (ant.IsFunctional && ant.Enabled && ant.EnableBroadcasting && ant.Radius > 0f)
+								{
+									masterAnts.Add((ant.WorldMatrix.Translation, ant.Radius, mcg.EntityId));
+									if (Log.IsDebugEnabled)
+										Log.Debug($"[{Name}] Master antenna: grid={mcg.EntityId} r={ant.Radius:F0}m");
+								}
+							}
+						}
+					}
+					catch (Exception ex) { Log.Debug($"[{Name}] Master antenna scan error: {ex.Message}"); }
+				}
+
+				Log.Info($"[{Name}] 🔍 Antenna check: Master {masterGridsSeen.Count} grid(s), {masterAnts.Count} antenna(s)");
+
+				// Scan slave grids
+				// Track BASE grids (with LCDs) separately from mechanical subgrids
+				var slaveAnts = new List<(Vector3D pos, float radius, long gridId)>();
+				var slaveLcdBaseGrids = new HashSet<long>(); // Grids that have slave LCDs
+				var slaveLcdBaseGridsWithCoverage = new HashSet<long>(); // Base grids that have antenna coverage
+
+				foreach (var slaves in _cachedSlavesByQuad.Values)
+				{
+					foreach (var slaveLcd in slaves)
+					{
+						try
+						{
+							var slaveGrid = slaveLcd?.CubeGrid as MyCubeGrid;
+							if (slaveGrid == null || slaveGrid.MarkedForClose) continue;
+
+							long baseGridId = slaveGrid.EntityId;
+							slaveLcdBaseGrids.Add(baseGridId); // Track this base grid has an LCD
+
+							// Check if this base grid (or its mechanical group) has an antenna
+							bool hasAntennaCoverage = false;
+							var gridsToCheck = new List<IMyCubeGrid>();
+							try
+							{
+								var group = ((IMyCubeGrid)slaveGrid).GetGridGroup(GridLinkTypeEnum.Mechanical);
+								if (group != null) group.GetGrids(gridsToCheck);
+								else gridsToCheck.Add(slaveGrid);
+							}
+							catch { gridsToCheck.Add(slaveGrid); }
+
+							var seenGrids = new HashSet<long>(); // Avoid duplicate scans within this mechanical group
+							foreach (var g in gridsToCheck)
+							{
+								var mcg = g as MyCubeGrid;
+								if (mcg == null || mcg.MarkedForClose) continue;
+								if (!seenGrids.Add(mcg.EntityId)) continue;
+
+								foreach (var block in mcg.GetFatBlocks())
+								{
+									var ant = block as IMyRadioAntenna;
+									if (ant == null) continue;
+
+									if (ant.IsFunctional && ant.Enabled && ant.EnableBroadcasting && ant.Radius > 0f)
+									{
+										slaveAnts.Add((ant.WorldMatrix.Translation, ant.Radius, mcg.EntityId));
+										hasAntennaCoverage = true;
+										if (Log.IsDebugEnabled)
+											Log.Debug($"[{Name}] Slave antenna: baseGrid={baseGridId} mechanicalGrid={mcg.EntityId} r={ant.Radius:F0}m");
+									}
+								}
+							}
+
+							if (hasAntennaCoverage)
+								slaveLcdBaseGridsWithCoverage.Add(baseGridId);
+						}
+						catch (Exception ex) { Log.Debug($"[{Name}] Slave antenna scan error: {ex.Message}"); }
+					}
+				}
+
+				Log.Info($"[{Name}] 🔍 Antenna check: Slave {slaveLcdBaseGrids.Count} LCD grid(s), {slaveAnts.Count} antenna(s) from {_cachedSlavesByQuad.Count} cached quadrant group(s)");
+
+				if (masterAnts.Count == 0)
+				{
+					Log.Info($"[{Name}] ⚠️ No master antennas — blocking stream");
+					_slaveGridsWithAntennaCoverage.Clear(); // No master = no coverage
+					return false;
+				}
+
+				// Require at least ONE slave LCD grid to have antenna coverage
+				// (per-grid gating will handle which specific grids can write)
+				if (slaveLcdBaseGridsWithCoverage.Count == 0)
+				{
+					Log.Info($"[{Name}] ⚠️ No slave LCD grids have antennas — blocking stream");
+					_slaveGridsWithAntennaCoverage.Clear();
+					return false;
+				}
+
+				// Range check: build set of slave grids that are in range of ANY master antenna
+				var slaveGridsInRange = new HashSet<long>();
+				int rangeChecksPassed = 0;
+				int rangeChecksFailed = 0;
+
+				foreach (var ma in masterAnts)
+				{
+					foreach (var sa in slaveAnts)
+					{
+						double dist = Vector3D.Distance(ma.pos, sa.pos);
+						double maxReach = ma.radius + sa.radius;
+						bool inRange = dist <= maxReach;
+
+						if (Log.IsDebugEnabled)
+							Log.Debug($"[{Name}] Range check: master(r={ma.radius:F0}m) ↔ slave(r={sa.radius:F0}m) dist={dist:F0}m, maxReach={maxReach:F0}m → {(inRange ? "✅ IN RANGE" : "❌ OUT OF RANGE")}");
+
+						if (inRange)
+						{
+							rangeChecksPassed++;
+							// Find which slave LCD base grid this antenna belongs to
+							foreach (var kvp in _cachedSlavesByQuad)
+							{
+								foreach (var slaveLcd in kvp.Value)
+								{
+									try
+									{
+										var slaveGrid = slaveLcd?.CubeGrid as MyCubeGrid;
+										if (slaveGrid == null || slaveGrid.MarkedForClose) continue;
+
+										// Check if this slave LCD's mechanical group contains the antenna's grid
+										var gridsToCheck = new List<IMyCubeGrid>();
+										try
+										{
+											var group = ((IMyCubeGrid)slaveGrid).GetGridGroup(GridLinkTypeEnum.Mechanical);
+											if (group != null) group.GetGrids(gridsToCheck);
+											else gridsToCheck.Add(slaveGrid);
+										}
+										catch { gridsToCheck.Add(slaveGrid); }
+
+										if (gridsToCheck.Any(g => g != null && g.EntityId == sa.gridId))
+										{
+											slaveGridsInRange.Add(slaveGrid.EntityId);
+											if (Log.IsDebugEnabled)
+												Log.Debug($"[{Name}] ✅ Coverage: master grid={ma.gridId} ↔ slave LCD grid={slaveGrid.EntityId}");
+										}
+									}
+									catch { }
+								}
+							}
+						}
+						else
+						{
+							rangeChecksFailed++;
+						}
+					}
+				}
+
+				if (Log.IsDebugEnabled || rangeChecksFailed > 0)
+					Log.Info($"[{Name}] 📡 Range checks: {rangeChecksPassed} passed, {rangeChecksFailed} failed");
+
+				// Update the coverage set (used by per-LCD gating in WriteLCDContent)
+				_slaveGridsWithAntennaCoverage = slaveGridsInRange;
+
+				// Require ALL slave LCD grids to be in range — if ANY slave is out of range, block entire stream
+				if (slaveGridsInRange.Count < slaveLcdBaseGrids.Count)
+				{
+					int outOfRangeCount = slaveLcdBaseGrids.Count - slaveGridsInRange.Count;
+					Log.Info($"[{Name}] ⚠️ {outOfRangeCount} slave LCD grid(s) out of antenna range — blocking stream (in range: {slaveGridsInRange.Count}/{slaveLcdBaseGrids.Count})");
+					return false;
+				}
+
+				Log.Info($"[{Name}] ✅ Antenna coverage: All {slaveGridsInRange.Count} slave LCD grid(s) in range");
+				return true;
+			}
+			catch (Exception ex)
+			{
+				Log.Warn(ex, $"[{Name}] Antenna check failed — allowing stream");
+				return true;
 			}
 		}
 
