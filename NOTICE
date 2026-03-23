@@ -1,0 +1,10 @@
+Please credit the original authors when redistributing or modifying this project.
+
+This repository is primarily maintained by SilentAssassin82 and builds on the image conversion work by Whiplash141:
+https://github.com/Whiplash141/Whips-Image-Converter
+
+Research and references used in this project:
+- "Ditherpunk" — creative dithering techniques by Surma: https://surma.dev/things/ditherpunk/
+- High‑Gain LUT / image enhancement (night‑vision): https://pmc.ncbi.nlm.nih.gov/articles/PMC11507526/
+
+When publishing derived work, please retain this NOTICE and include a link to the original repository where reasonably possible. Rebranding the project as your own without attribution is discouraged.
