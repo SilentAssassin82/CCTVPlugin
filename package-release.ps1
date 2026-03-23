@@ -40,6 +40,14 @@ foreach ($path in @($pluginSrc, $captureSrc, $modSrc)) {
 if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
 New-Item -ItemType Directory -Path $staging | Out-Null
 
+# Include repository-level docs and license in the release root
+foreach ($doc in @("LICENSE", "NOTICE", "README.md", "CONTRIBUTORS.md")) {
+    $src = Join-Path $PSScriptRoot $doc
+    if (Test-Path $src) {
+        Copy-Item -Path $src -Destination $staging -Force
+    }
+}
+
 # Plugin — dll + manifest only (no .pdb)
 $pluginDst = Join-Path $staging "CCTVPlugin"
 New-Item -ItemType Directory -Path $pluginDst | Out-Null
