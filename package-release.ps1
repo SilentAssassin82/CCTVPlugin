@@ -25,16 +25,37 @@ $staging = Join-Path $env:TEMP "CCTVRelease-$Version"
 $zipPath = Join-Path $PSScriptRoot $zipName
 
 # ── Source paths ─────────────────────────────────────────────────────────────
-$pluginSrc  = "C:\Torch\Plugins\CCTVPlugin"
+# Prefer local project outputs, fall back to a Torch installation path if present
+$defaultPluginSrc  = "C:\Torch\Plugins\CCTVPlugin"
+$localPluginCandidates = @(
+    "$PSScriptRoot\CCTVPlugin\bin\Release",
+    "$PSScriptRoot\CCTVPlugin\bin\Release\net48",
+    "$PSScriptRoot\CCTVPlugin\bin\Debug\net48"
+)
+
+$pluginSrc = $null
+if (Test-Path $defaultPluginSrc) { $pluginSrc = $defaultPluginSrc }
+else {
+    foreach ($p in $localPluginCandidates) {
+        if (Test-Path $p) { $pluginSrc = $p; break }
+    }
+}
+
 $captureSrc = Join-Path $PSScriptRoot "CCTVCapture\bin\Release\net48"
 $modSrc     = Join-Path $PSScriptRoot "CCTVMod"
 
-foreach ($path in @($pluginSrc, $captureSrc, $modSrc)) {
-    if (-not (Test-Path $path)) {
-        Write-Error "Source not found: $path  (build the solution first)"
-        exit 1
-    }
+# Validate required sources and provide clearer diagnostics
+$missing = @()
+if (-not $pluginSrc) { $missing += "plugin (searched: $defaultPluginSrc and local outputs)" }
+if (-not (Test-Path $captureSrc)) { $missing += $captureSrc }
+if (-not (Test-Path $modSrc)) { $missing += $modSrc }
+
+if ($missing.Count -gt 0) {
+    Write-Error "One or more required source paths are missing:`n  $(($missing -join "`n  "))`nBuild the solution (Release) or copy the plugin into C:\\Torch\\Plugins\\CCTVPlugin before packaging."
+    exit 1
 }
+
+Write-Host "Using plugin source: $pluginSrc" -ForegroundColor Yellow
 
 # ── Stage files ───────────────────────────────────────────────────────────────
 if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
