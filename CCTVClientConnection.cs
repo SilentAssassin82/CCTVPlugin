@@ -178,6 +178,17 @@ namespace CCTVPlugin
 		private bool _hasPendingSingleFrame;
 		private bool _hasPendingGridFrame;
 
+		// Pre-split quad frame: CCTVCapture performs the quadrant extraction and sends
+		// 4 small QUAD messages instead of one large FRAME.  The game thread skips all
+		// line-scanning and ExtractQuadrant work — it just calls WriteText() × 4.
+		// Staging (listener thread) → Pending (game thread) is a two-step copy inside
+		// _frameQueueLock so reads and writes never race.
+		private string _stagingQuadTL, _stagingQuadTR, _stagingQuadBL, _stagingQuadBR;
+		private bool _stagingQuadIsColor;
+		private string _pendingQuadTL, _pendingQuadTR, _pendingQuadBL, _pendingQuadBR;
+		private bool _pendingQuadIsColor;
+		private volatile bool _hasPendingQuadFrame;
+
 		// LCD write diagnostics — counters reset on each heartbeat log so the values
 		// show per-interval rates.  Lets us see exactly where the frame pipeline
 		// stalls when a user reports "LCDs stopped updating".
@@ -887,17 +898,17 @@ namespace CCTVPlugin
 			if (string.IsNullOrEmpty(message))
 				return;
 
-			// Log all incoming messages for debugging (except FRAME which is huge)
-			if (!message.StartsWith("FRAME "))
+			// Log all incoming messages for debugging (except FRAME/QUAD which are large)
+			if (!message.StartsWith("FRAME ") && !message.StartsWith("QUAD "))
 			{
 				Log.Debug($"[{Name}] << {message}");
 			}
 			else
 			{
-				Log.Debug($"[{Name}] << FRAME command received ({message.Length} bytes)");
+				Log.Debug($"[{Name}] << {(message.StartsWith("QUAD ") ? "QUAD" : "FRAME")} command received ({message.Length} bytes)");
 			}
 
-			// PING command
+
 			if (message == "PING")
 			{
 				Send("PONG");
@@ -1172,6 +1183,79 @@ namespace CCTVPlugin
 				return;
 			}
 
+			// QUAD command — a single pre-split, pre-compressed quadrant from CCTVCapture.
+			// CCTVCapture sends TL → TR → BL → BR sequentially; when BR arrives all 4 are
+			// promoted atomically to the pending quad frame for the game thread to write.
+			// Format: QUAD <TL|TR|BL|BR> <COLOR|GRAY> <base64gz>
+			if (message.StartsWith("QUAD "))
+			{
+				string[] parts = message.Split(new[] { ' ' }, 4);
+				if (parts.Length == 4)
+				{
+					string quadName  = parts[1];
+					bool   isColor   = parts[2] == "COLOR";
+					string base64Data = parts[3];
+
+					try
+					{
+						int base64Len = base64Data.Length;
+						if (_base64CharBuf == null || _base64CharBuf.Length < base64Len)
+							_base64CharBuf = new char[base64Len];
+						base64Data.CopyTo(0, _base64CharBuf, 0, base64Len);
+						byte[] bytes = Convert.FromBase64CharArray(_base64CharBuf, 0, base64Len);
+
+						if (_decompressMs == null)
+							_decompressMs = new MemoryStream(bytes.Length * 4);
+						else
+							_decompressMs.SetLength(0);
+
+						string quadContent;
+						using (var ms = new MemoryStream(bytes))
+						using (var gz = new GZipStream(ms, CompressionMode.Decompress))
+						{
+							gz.CopyTo(_decompressMs);
+							quadContent = Encoding.UTF8.GetString(_decompressMs.GetBuffer(), 0, (int)_decompressMs.Length);
+						}
+
+						lock (_frameQueueLock)
+						{
+							switch (quadName)
+							{
+								case "TL": _stagingQuadTL = quadContent; _stagingQuadIsColor = isColor; break;
+								case "TR": _stagingQuadTR = quadContent; break;
+								case "BL": _stagingQuadBL = quadContent; break;
+								case "BR":
+									_stagingQuadBR = quadContent;
+									// BR arrives last — promote if all 4 are ready
+									if (_stagingQuadTL != null && _stagingQuadTR != null && _stagingQuadBL != null)
+									{
+										_pendingQuadTL      = _stagingQuadTL;
+										_pendingQuadTR      = _stagingQuadTR;
+										_pendingQuadBL      = _stagingQuadBL;
+										_pendingQuadBR      = _stagingQuadBR;
+										_pendingQuadIsColor = _stagingQuadIsColor;
+										_hasPendingQuadFrame = true;
+										_stagingQuadTL = _stagingQuadTR = _stagingQuadBL = _stagingQuadBR = null;
+										Interlocked.Increment(ref _framesReceived);
+									}
+									break;
+							}
+						}
+
+						Log.Debug($"[{Name}] ✅ QUAD {quadName} decoded ({quadContent.Length} chars)");
+					}
+					catch (Exception ex)
+					{
+						Log.Error(ex, $"[{Name}] ❌ Failed to process QUAD {quadName}");
+					}
+				}
+				else
+				{
+					Log.Warn($"[{Name}] ⚠️ QUAD command malformed (parts: {parts.Length})");
+				}
+				return;
+			}
+
 			Log.Debug($"[{Name}] Unknown command: {message}");
 		}
 
@@ -1365,13 +1449,26 @@ namespace CCTVPlugin
 					sw.Stop();
 					_hasPendingGridFrame = false;
 					if (sw.Elapsed.TotalMilliseconds > _worstWriteMs) _worstWriteMs = sw.Elapsed.TotalMilliseconds;
-					if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
-						Log.Warn($"[{Name}] ⏱️ SLOW grid LCD write: {sw.Elapsed.TotalMilliseconds:F1}ms ({_pendingGridFrame.width}×{_pendingGridFrame.height})");
-					_pendingGridFrame = default; // Release LOH content string reference for GC
-				}
-			}
+						if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
+								Log.Warn($"[{Name}] ⏱️ SLOW grid LCD write: {sw.Elapsed.TotalMilliseconds:F1}ms ({_pendingGridFrame.width}×{_pendingGridFrame.height})");
+							_pendingGridFrame = default; // Release LOH content string reference for GC
+						}
+						// Pre-split quad frame: CCTVCapture already split and compressed each quadrant,
+						// so the game thread only needs 4× WriteText() with no line-scanning.
+						if (gridTick && _hasPendingQuadFrame)
+						{
+							var sw = Stopwatch.StartNew();
+							WritePreSplitGridLCDs(_pendingQuadTL, _pendingQuadTR, _pendingQuadBL, _pendingQuadBR, _pendingQuadIsColor);
+							sw.Stop();
+							_hasPendingQuadFrame = false;
+							_pendingQuadTL = _pendingQuadTR = _pendingQuadBL = _pendingQuadBR = null;
+							if (sw.Elapsed.TotalMilliseconds > _worstWriteMs) _worstWriteMs = sw.Elapsed.TotalMilliseconds;
+							if (sw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
+								Log.Warn($"[{Name}] ⏱️ SLOW pre-split quad write: {sw.Elapsed.TotalMilliseconds:F1}ms");
+						}
+					}
 
-			tickSw.Stop();
+					tickSw.Stop();
 			if (tickSw.Elapsed.TotalMilliseconds > _worstTickMs)
 				_worstTickMs = tickSw.Elapsed.TotalMilliseconds;
 			if (tickSw.Elapsed.TotalMilliseconds > SLOW_TICK_THRESHOLD_MS)
@@ -1777,13 +1874,61 @@ namespace CCTVPlugin
 			}
 
 			if (Log.IsDebugEnabled && startX == 0 && startY == 0)
-				Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {_quadrantSb.Length} chars (expected ~{width * height + height - 1})");
+					Log.Debug($"[{Name}] ExtractQuadrant TL: extracted {_quadrantSb.Length} chars (expected ~{width * height + height - 1})");
 
-			return _quadrantSb;
-		}
+				return _quadrantSb;
+			}
 
-		/// <summary>
-		/// Applies a uniform horizontal content shift to every line in a frame string.
+			/// <summary>
+			/// Write pre-split quadrant strings directly to the 4 grid LCDs.
+			/// Called when CCTVCapture sends QUAD messages instead of a full FRAME —
+			/// no line-scanning or ExtractQuadrant work needed on the game thread.
+			/// </summary>
+			private void WritePreSplitGridLCDs(string tl, string tr, string bl, string br, bool isColor)
+			{
+				try
+				{
+					string baseName;
+					if (!string.IsNullOrEmpty(_config.LiveFeedLcdName))
+						baseName = _config.LiveFeedLcdName;
+					else if (_cameras.Count > 0 && _currentCameraIndex >= 0 && _currentCameraIndex < _cameras.Count)
+						baseName = _cameras[_currentCameraIndex].DisplayName;
+					else
+					{
+						Log.Warn($"[{Name}] WritePreSplitGridLCDs: no LCD name — frame dropped");
+						return;
+					}
+
+					float gridFontSize = isColor
+						? _sharedConfig.GridFontSize
+						: _sharedConfig.GrayscaleGridFontSize * 2f;
+					gridFontSize *= _sharedConfig.FontScale;
+					gridFontSize = Math.Max(0.03f, Math.Min(0.35f, gridFontSize));
+
+					int needed = (tl?.Length ?? 0) + 1;
+					if (_quadrantSb == null || _quadrantSb.Capacity < needed)
+						_quadrantSb = new StringBuilder(needed);
+
+					_quadrantSb.Clear(); _quadrantSb.Append(tl);
+					WriteSingleLCD($"{_config.LcdPrefix} {baseName}_TL", _quadrantSb, isColor, gridFontSize);
+					_quadrantSb.Clear(); _quadrantSb.Append(tr);
+					WriteSingleLCD($"{_config.LcdPrefix} {baseName}_TR", _quadrantSb, isColor, gridFontSize);
+					_quadrantSb.Clear(); _quadrantSb.Append(bl);
+					WriteSingleLCD($"{_config.LcdPrefix} {baseName}_BL", _quadrantSb, isColor, gridFontSize);
+					_quadrantSb.Clear(); _quadrantSb.Append(br);
+					WriteSingleLCD($"{_config.LcdPrefix} {baseName}_BR", _quadrantSb, isColor, gridFontSize);
+
+					_lcdWritesGrid++;
+					CopyToSlaveLCDs(_config.LcdPrefix, baseName);
+				}
+				catch (Exception ex)
+				{
+					Log.Error(ex, $"[{Name}] Error in WritePreSplitGridLCDs");
+				}
+			}
+
+			/// <summary>
+			/// Applies a uniform horizontal content shift to every line in a frame string.
 		/// Positive shift trims N chars from the left of each line (image moves left on LCD).
 		/// Negative shift prepends N spaces to each line (image moves right on LCD).
 		/// Returns the original string unchanged when shift is 0.

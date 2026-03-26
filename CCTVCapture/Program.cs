@@ -763,7 +763,7 @@ namespace CCTVCapture
 
                 // Now parallelize the CPU-heavy ASCII conversion (thread-safe)
                 Task<(string compressed, string mode)> singleTask = null;
-                Task<(string compressed, string mode)> gridTask = null;
+                Task<(string tl, string tr, string bl, string br, bool isColor)> gridTask = null;
 
                 // Start single-LCD ASCII conversion on background thread
                 if (singleFrame != null)
@@ -824,17 +824,23 @@ namespace CCTVCapture
                     });
                 }
 
-                // Start grid ASCII conversion on background thread
+                // Start grid ASCII conversion on background thread.
+                // The task converts the full frame, splits it into 4 quadrants, and compresses
+                // each independently so the game thread only needs 4× WriteText() calls.
                 if (gridFrame != null)
                 {
                     Bitmap frameToConvert = gridFrame; // Capture for lambda
                     int res = effectiveGridRes;
+                    // Capture alignment settings by value — they are read-only once set
+                    int captureVOffset = _clientSettings.GridVerticalOffset;
+                    int captureHOffset = _clientSettings.GridHorizontalOffset;
+                    int captureShift   = _clientSettings.GridContentShift;
                     gridTask = Task.Run(() =>
                     {
                         try
                         {
-                            string compressed;
-                            string mode;
+                            string fullContent;
+                            bool isColorLocal;
 
                             if (_useColorMode)
                             {
@@ -851,8 +857,8 @@ namespace CCTVCapture
                                         colorChars = AsciiConverter.ConvertToColorChars(frameToConvert, res, res);
                                         break;
                                 }
-                                compressed = AsciiConverter.CompressAscii(colorChars);
-                                mode = "COLORGZ";
+                                fullContent  = colorChars;
+                                isColorLocal = true;
                             }
                             else
                             {
@@ -869,15 +875,24 @@ namespace CCTVCapture
                                         ascii = AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true, forGrid: true);
                                         break;
                                 }
-                                compressed = AsciiConverter.CompressAscii(ascii);
-                                mode = "GRAYGZ";
+                                fullContent  = ascii;
+                                isColorLocal = false;
                             }
 
-                            return (compressed, mode);
+                            // Split into 4 quadrants and compress each independently.
+                            // CompressAscii reuses [ThreadStatic] buffers — sequential calls on
+                            // the same thread are safe (SetLength(0) resets between calls).
+                            var (tl, tr, bl, br) = SplitIntoQuads(fullContent, res, captureVOffset, captureHOffset, captureShift);
+                            string tlComp = AsciiConverter.CompressAscii(tl);
+                            string trComp = AsciiConverter.CompressAscii(tr);
+                            string blComp = AsciiConverter.CompressAscii(bl);
+                            string brComp = AsciiConverter.CompressAscii(br);
+
+                            return (tlComp, trComp, blComp, brComp, isColorLocal);
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"[ERROR] {res}×{res} conversion failed: {ex.Message}");
+                            Console.WriteLine($"[ERROR] {res}×{res} grid conversion failed: {ex.Message}");
                             throw;
                         }
                     });
@@ -897,13 +912,16 @@ namespace CCTVCapture
 
                 if (gridTask != null)
                 {
-                    var result = gridTask.Result;
-                    string gridFrameCommand = $"FRAME {effectiveGridRes} {effectiveGridRes} {result.mode} {result.compressed}";
+                    var (tlComp, trComp, blComp, brComp, isColorResult) = gridTask.Result;
+                    string colorMode = isColorResult ? "COLOR" : "GRAY";
 
                     if (shouldLog)
-                        Console.WriteLine($">> FRAME {effectiveGridRes} {effectiveGridRes} {result.mode} ... ({gridFrameCommand.Length} bytes) [Grid]");
+                        Console.WriteLine($">> QUAD TL/TR/BL/BR {colorMode} [{tlComp.Length + trComp.Length + blComp.Length + brComp.Length} bytes total] [Grid]");
 
-                    _writer.WriteLine(gridFrameCommand);
+                    _writer.WriteLine($"QUAD TL {colorMode} {tlComp}");
+                    _writer.WriteLine($"QUAD TR {colorMode} {trComp}");
+                    _writer.WriteLine($"QUAD BL {colorMode} {blComp}");
+                    _writer.WriteLine($"QUAD BR {colorMode} {brComp}");
                 }
 
                 // Clean up resized bitmaps
@@ -1066,6 +1084,84 @@ namespace CCTVCapture
             {
                 Console.WriteLine($"[ERROR] Admin teleport failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Splits a full grid ASCII/color frame string into 4 quadrant strings using the
+        /// same offset/shift logic the plugin applies in WriteGridLCDs, so the game thread
+        /// only needs 4× WriteText() calls with no line-scanning or extraction work.
+        /// </summary>
+        private static (string tl, string tr, string bl, string br) SplitIntoQuads(
+            string content, int gridRes, int vOffset, int hOffset, int shift)
+        {
+            int[] lineStarts  = new int[gridRes + 2];
+            int[] lineLengths = new int[gridRes + 2];
+            int lineCount = 0, ls = 0;
+            for (int i = 0; i <= content.Length; i++)
+            {
+                if (i == content.Length || content[i] == '\n')
+                {
+                    if (lineCount < lineStarts.Length)
+                    {
+                        lineStarts[lineCount]  = ls;
+                        lineLengths[lineCount] = i - ls;
+                        lineCount++;
+                    }
+                    ls = i + 1;
+                }
+            }
+
+            if (lineCount < 4)
+                return (content, string.Empty, string.Empty, string.Empty);
+
+            int quadW          = gridRes / 2;
+            int effectiveQuadH = lineCount / 2;
+
+            // Mirror WriteGridLCDs offset calculation exactly
+            int tlStartY = Math.Max(0, Math.Min(vOffset, effectiveQuadH - 1));
+            int blStartY = Math.Max(0, effectiveQuadH - vOffset);
+            int tlStartX = Math.Max(0, Math.Min(hOffset, quadW - 1) + shift);
+            int trStartX = Math.Max(0, quadW - hOffset + shift);
+
+            string tl = ExtractQuadrantStr(content, lineStarts, lineLengths, lineCount, tlStartX, tlStartY, quadW, effectiveQuadH);
+            string tr = ExtractQuadrantStr(content, lineStarts, lineLengths, lineCount, trStartX, tlStartY, quadW, effectiveQuadH);
+            string bl = ExtractQuadrantStr(content, lineStarts, lineLengths, lineCount, tlStartX, blStartY, quadW, effectiveQuadH);
+            string br = ExtractQuadrantStr(content, lineStarts, lineLengths, lineCount, trStartX, blStartY, quadW, effectiveQuadH);
+
+            return (tl, tr, bl, br);
+        }
+
+        /// <summary>
+        /// Extracts a rectangular region from a pre-scanned content string.
+        /// Mirrors the plugin's ExtractQuadrant logic so both sides produce identical text.
+        /// </summary>
+        private static string ExtractQuadrantStr(
+            string content, int[] lineStarts, int[] lineLengths, int lineCount,
+            int startX, int startY, int quadW, int quadH)
+        {
+            var sb = new StringBuilder(quadW * quadH + quadH);
+            for (int y = 0; y < quadH && (startY + y) < lineCount; y++)
+            {
+                int li  = startY + y;
+                int ls2 = lineStarts[li];
+                int ll  = lineLengths[li];
+
+                if (startX < ll)
+                {
+                    int sliceW = Math.Min(quadW, ll - startX);
+                    sb.Append(content, ls2 + startX, sliceW);
+                    if (sliceW < quadW)
+                        sb.Append(' ', quadW - sliceW);
+                }
+                else
+                {
+                    sb.Append(' ', quadW);
+                }
+
+                if (y < quadH - 1)
+                    sb.Append('\n');
+            }
+            return sb.ToString();
         }
     }
 }
