@@ -147,8 +147,8 @@ When a feed LCD is placed on a **non-static (moving) grid** — such as a ship o
 1. The Torch plugin scans for camera blocks whose names start with the configured `CameraPrefix` (default `LCD_TVCamera`)
 2. On each camera cycle it sends a multiplayer message containing the camera's world position and orientation
 3. The client-side mod receives the message and calls `SetCameraController()` locally — no character moves, no physics involved
-4. `CCTVCapture.exe` captures the SE window, converts it to SE color characters (0xE100 palette, 512 colors), GZip-compresses the frame and sends it over TCP
-5. The plugin decompresses the frame on a background thread, queues it, then writes it to the matching LCDs on the game thread
+4. `CCTVCapture.exe` captures the SE window, converts it to SE color characters (0xE100 palette, 512 colors), GZip-compresses the result and sends it over TCP using a binary framing protocol (8-byte header: `[4B type][4B length]` + raw payload). For 2×2 grids the image is split into quadrants inside CCTVCapture before sending — each quadrant travels as its own `MSG_QUAD` frame. The connection opens with an HMAC-SHA256 challenge/response handshake
+5. The plugin decompresses each frame on a background thread, queues it, then writes it to the matching LCDs on the game thread
 
 ### Frame routing
 
@@ -314,6 +314,10 @@ Each instance requires its own running `CCTVCapture.exe` connecting on the match
 - **Dithering** — `Bayer` (stable, low flicker) or `FloydSteinberg` (smoother gradients) applied before color quantisation
 - **Post-processing filters** — `LightBlur`, `MediumBlur`, or `Sharpen` pre-filters for single LCD and 2×2 grid independently
 - **Content shift sliders** — horizontal shift (in characters) for grid and single LCD panels independently to centre the image
+- **Binary wire protocol** — post-handshake TCP uses compact 8-byte binary frame headers (`MSG_FRAME` for single LCD, `MSG_QUAD` per grid quadrant, `MSG_TEXT` for control). No text parsing, no partial-read races — significantly improved stream stability
+- **Authenticated connection** — HMAC-SHA256 challenge/response handshake (`HELLO` nonce → `AUTH` response). Unauthorized connections are rejected before any frame data is exchanged
+- **Stall detection** — 30-second receive timeout on the plugin side. If CCTVCapture stops sending (hung or closed), the plugin logs a warning and cleanly disconnects, immediately readying itself for reconnect
+- **TCP KeepAlive** — enabled on the listener socket so silently dropped connections are detected without waiting for the full receive timeout
 - GZip frame compression (~14× ratio over uncompressed; negligible bandwidth)
 - Configurable LCD render resolution — single slider controls capture and grid resolution (single LCD = half)
 - 2×2 grid offset sliders — close the physical seam between LCD panels (vertical and horizontal)
@@ -369,6 +373,13 @@ Isy's Inventory Manager performs heavy grid-wide inventory scans via a Programma
 ---
 
 ## Changelog
+
+### v1.6.0
+- **Binary wire protocol:** All post-handshake communication between CCTVCapture and the plugin now uses a compact binary framing format (`[4B message type][4B payload length][N bytes payload]`). `MSG_FRAME` carries single-LCD frames, `MSG_QUAD` carries individual 2×2 grid quadrant frames, and `MSG_TEXT` carries control messages (PING, CONFIG, etc.). Eliminates text-parsing edge cases and partial-read races, significantly improving stream stability.
+- **Quadrant splitting moved to CCTVCapture:** The 2×2 grid image is now split into its four quadrants (TL/TR/BL/BR) inside `CCTVCapture.exe` before transmission. Each quadrant travels as its own `MSG_QUAD` binary frame. Removes the split logic from the plugin game thread.
+- **HMAC challenge-response handshake:** The TCP handshake now uses an HMAC-SHA256 challenge/response exchange (`HELLO` nonce → `AUTH` response). Unauthorized connections are rejected before any data is exchanged.
+- **Stall detection & receive timeout:** The plugin applies a 30-second receive timeout on each client connection. If CCTVCapture stops sending frames (process hung or window closed), the plugin logs a clear warning and cleanly disconnects, immediately readying itself for reconnect.
+- **TCP KeepAlive:** Enabled on the listener socket to detect silently dropped connections faster without waiting for the full receive timeout.
 
 ### v1.5.0
 - **Night Vision mode:** New `NightVisionMode` option (requires Desaturate) maps grayscale luminance to a green phosphor gradient (black → green → white-green) baked directly into pixel RGB. Produces proper NV imagery through the color char pipeline.
