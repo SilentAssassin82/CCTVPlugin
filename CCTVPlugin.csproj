@@ -14,6 +14,8 @@
     <Compile Remove="CCTVMod\**" />
     <EmbeddedResource Remove="CCTVMod\**" />
     <None Remove="CCTVMod\**" />
+    <!-- CCTVCommon types come in via ProjectReference DLL — exclude source files to avoid CS0436 -->
+    <Compile Remove="CCTVCommon\**" />
     <!-- Exclude generated obj files from sub-projects to avoid duplicate attribute errors -->
     <Compile Remove="CCTVCapture\obj\**" />
     <Compile Remove="CCTVTester\obj\**" />

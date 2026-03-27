@@ -41,13 +41,22 @@ else {
     }
 }
 
-$captureSrc = Join-Path $PSScriptRoot "CCTVCapture\bin\Release\net48"
+$captureCandidates = @(
+    "$PSScriptRoot\CCTVCapture\bin\x64\Release\net48",
+    "$PSScriptRoot\CCTVCapture\bin\Release\net48"
+)
+
+$captureSrc = $null
+foreach ($p in $captureCandidates) {
+    if (Test-Path (Join-Path $p "CCTVCapture.exe")) { $captureSrc = $p; break }
+}
+
 $modSrc     = Join-Path $PSScriptRoot "CCTVMod"
 
 # Validate required sources and provide clearer diagnostics
 $missing = @()
 if (-not $pluginSrc) { $missing += "plugin (searched: $defaultPluginSrc and local outputs)" }
-if (-not (Test-Path $captureSrc)) { $missing += $captureSrc }
+if (-not $captureSrc) { $missing += "CCTVCapture (searched: $($captureCandidates -join ', '))" }
 if (-not (Test-Path $modSrc)) { $missing += $modSrc }
 
 if ($missing.Count -gt 0) {
@@ -55,7 +64,8 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-Write-Host "Using plugin source: $pluginSrc" -ForegroundColor Yellow
+Write-Host "Using plugin source:  $pluginSrc" -ForegroundColor Yellow
+Write-Host "Using capture source: $captureSrc" -ForegroundColor Yellow
 
 # ── Stage files ───────────────────────────────────────────────────────────────
 if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }

@@ -14,8 +14,6 @@ namespace CCTVCapture
     {
         private static TcpClient _client;
         private static NetworkStream _stream;
-        private static StreamReader _reader;
-        private static StreamWriter _writer;
 
         // Camera coordinate index
         private static Dictionary<string, (double X, double Y, double Z)> _cameraIndex = new Dictionary<string, (double, double, double)>();
@@ -150,18 +148,26 @@ namespace CCTVCapture
                 _client.Client.IOControl(IOControlCode.KeepAliveValues, keepAliveValues, null);
 
                 _client.SendTimeout = 5000;    // 5s write timeout
-                _client.ReceiveTimeout = 0;    // reads are non-blocking (DataAvailable check)
+                _client.ReceiveTimeout = 30000; // 30s read timeout — prevents blocking forever if server stalls
                 _client.NoDelay = true;
 
                 _stream = _client.GetStream();
-                _reader = new StreamReader(_stream, Encoding.UTF8);
-                _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
 
                 Console.WriteLine("Connected to Torch plugin!");
 
-                // --- HMAC challenge-response handshake ---
+                // --- HMAC challenge-response handshake (plain text, pre-binary-protocol) ---
                 // Read HELLO which contains the nonce: "HELLO <name> v1.0 CHALLENGE:<nonce>"
-                string hello = _reader.ReadLine();
+                // The handshake is still newline-terminated plain text; binary framing starts after AUTH.
+                byte[] helloBuf = new byte[512];
+                int helloLen = 0;
+                while (helloLen < helloBuf.Length)
+                {
+                    int b = _stream.ReadByte();
+                    if (b < 0) break;
+                    if (b == '\n') break;
+                    helloBuf[helloLen++] = (byte)b;
+                }
+                string hello = Encoding.UTF8.GetString(helloBuf, 0, helloLen).TrimEnd('\r');
                 Console.WriteLine($"<< {hello}");
                 string nonce = null;
                 if (hello != null)
@@ -180,14 +186,16 @@ namespace CCTVCapture
                 string hmacResponse;
                 using (var hmac = new System.Security.Cryptography.HMACSHA256(keyBytes))
                     hmacResponse = Convert.ToBase64String(hmac.ComputeHash(nonceBytes));
-                _writer.WriteLine($"AUTH {hmacResponse}");
-                Console.WriteLine(">> AUTH sent");
-                // --- end handshake ---
 
-                // Test connection
-                _writer.WriteLine("PING");
-                string response = _reader.ReadLine();  // reads PONG
-                Console.WriteLine($"<< {response}");
+                // Send AUTH as plain text (still part of the handshake, pre-binary)
+                byte[] authBytes = Encoding.UTF8.GetBytes($"AUTH {hmacResponse}\n");
+                _stream.Write(authBytes, 0, authBytes.Length);
+                Console.WriteLine(">> AUTH sent");
+                // --- end handshake — binary framing starts here ---
+
+                // Test connection with binary PING
+                SendText("PING");
+                Console.WriteLine(">> PING");
 
                 // Initialise heartbeat tracking after successful handshake
                 _lastPingSent = DateTime.Now;
@@ -195,7 +203,7 @@ namespace CCTVCapture
                 _connectionDead = false;
 
                 // Request config from server (will arrive asynchronously in main loop)
-                _writer.WriteLine("GETCONFIG");
+                SendText("GETCONFIG");
                 Console.WriteLine(">> GETCONFIG (waiting for response in message loop...)");
 
                 Console.WriteLine($"Initial settings (before server config):");
@@ -206,14 +214,14 @@ namespace CCTVCapture
                 Console.WriteLine("Press Ctrl+C to exit\n");
 
                 // Request camera list
-                _writer.WriteLine("LISTCAMERAS");
+                SendText("LISTCAMERAS");
                 Thread.Sleep(100);
 
                 // Read initial responses (may include CONFIG, CAMERAS, etc.)
                 bool earlyConfigReceived = false;
-                while (_stream.DataAvailable)
+                while (_client.Available >= 8)
                 {
-                    string line = _reader.ReadLine();
+                    string line = ReadOneBinaryTextFrame();
                     if (line != null)
                     {
                         Console.WriteLine($"<< {line}");
@@ -254,16 +262,16 @@ namespace CCTVCapture
 
                 // Auto-switch to camera 1
                 Console.WriteLine("\n[INFO] Switching to camera 1...");
-                _writer.WriteLine("CAMERA 1");
+                SendText("CAMERA 1");
 
                 // Wait up to 3 seconds for ALL startup messages (CONFIG, CAMERAS, OK)
                 DateTime startupWaitStart = DateTime.Now;
                 bool configReceived = earlyConfigReceived;
                 while ((DateTime.Now - startupWaitStart).TotalSeconds < 3)
                 {
-                    if (_stream.DataAvailable)
+                    if (_client.Available >= 8)
                     {
-                        string line = _reader.ReadLine();
+                        string line = ReadOneBinaryTextFrame();
                         if (line != null)
                         {
                             Console.WriteLine($"<< {line}");
@@ -320,9 +328,9 @@ namespace CCTVCapture
                     try
                     {
                         // Check for incoming messages
-                        if (_stream.DataAvailable)
+                        if (_client.Available >= 8)
                         {
-                            string line = _reader.ReadLine();
+                            string line = ReadOneBinaryTextFrame();
                             if (line != null)
                             {
                                 Console.WriteLine($"<< {line}");
@@ -417,8 +425,8 @@ namespace CCTVCapture
                         {
                             try
                             {
-                                _writer.WriteLine("PING");
-                                _lastPingSent = DateTime.Now;
+                                SendText("PING");
+                                   _lastPingSent = DateTime.Now;
                                 if (_verboseLogging)
                                     Console.WriteLine("[HEARTBEAT] PING sent");
                             }
@@ -472,12 +480,8 @@ namespace CCTVCapture
 
                 // Connection ended — clean up before potential reconnect
                 Console.WriteLine("[INFO] Connection ended, cleaning up...");
-                try { _writer?.Close(); } catch { }
-                try { _reader?.Close(); } catch { }
                 try { _stream?.Close(); } catch { }
                 try { _client?.Close(); } catch { }
-                _writer = null;
-                _reader = null;
                 _stream = null;
                 _client = null;
 
@@ -560,7 +564,7 @@ namespace CCTVCapture
                     $"GridContentShift={_clientSettings.GridContentShift} " +
                     $"SingleContentShift={_clientSettings.SingleContentShift} " +
                     $"LcdFontTint={_clientSettings.LcdFontTint}";
-                _writer.WriteLine(prefs);
+                SendText(prefs);
                 Console.WriteLine($">> CLIENTPREFS sent (DisplayFPS={effectiveDisplayFps}, " +
                     $"GridVOff={_clientSettings.GridVerticalOffset}, GridHOff={_clientSettings.GridHorizontalOffset}, " +
                     $"GridShift={_clientSettings.GridContentShift}, SingleShift={_clientSettings.SingleContentShift}, " +
@@ -762,8 +766,8 @@ namespace CCTVCapture
                 }
 
                 // Now parallelize the CPU-heavy ASCII conversion (thread-safe)
-                Task<(string compressed, string mode)> singleTask = null;
-                Task<(string tl, string tr, string bl, string br, bool isColor)> gridTask = null;
+                Task<(byte[] gzBytes, byte flags)> singleTask = null;
+                Task<(byte[] tl, byte[] tr, byte[] bl, byte[] br, bool isColor)> gridTask = null;
 
                 // Start single-LCD ASCII conversion on background thread
                 if (singleFrame != null)
@@ -774,8 +778,8 @@ namespace CCTVCapture
                     {
                         try
                         {
-                            string compressed;
-                            string mode;
+                            byte[] gzBytes;
+                            byte flags;
 
                             if (_useColorMode)
                             {
@@ -792,8 +796,8 @@ namespace CCTVCapture
                                         colorChars = AsciiConverter.ConvertToColorChars(frameToConvert, res, res);
                                         break;
                                 }
-                                compressed = AsciiConverter.CompressAscii(colorChars);
-                                mode = "COLORGZ";
+                                gzBytes = AsciiConverter.CompressAsciiBytes(colorChars);
+                                flags = (byte)(CCTVCommon.BinaryProtocol.FLAG_COLOR | CCTVCommon.BinaryProtocol.FLAG_GZ);
                             }
                             else
                             {
@@ -810,11 +814,11 @@ namespace CCTVCapture
                                         ascii = AsciiConverter.ConvertToAscii(frameToConvert, res, res, useBlockMode: true);
                                         break;
                                 }
-                                compressed = AsciiConverter.CompressAscii(ascii);
-                                mode = "GRAYGZ";
+                                gzBytes = AsciiConverter.CompressAsciiBytes(ascii);
+                                flags = CCTVCommon.BinaryProtocol.FLAG_GZ;
                             }
 
-                            return (compressed, mode);
+                            return (gzBytes, flags);
                         }
                         catch (Exception ex)
                         {
@@ -883,12 +887,12 @@ namespace CCTVCapture
                             // CompressAscii reuses [ThreadStatic] buffers — sequential calls on
                             // the same thread are safe (SetLength(0) resets between calls).
                             var (tl, tr, bl, br) = SplitIntoQuads(fullContent, res, captureVOffset, captureHOffset, captureShift);
-                            string tlComp = AsciiConverter.CompressAscii(tl);
-                            string trComp = AsciiConverter.CompressAscii(tr);
-                            string blComp = AsciiConverter.CompressAscii(bl);
-                            string brComp = AsciiConverter.CompressAscii(br);
+                            byte[] tlBytes = AsciiConverter.CompressAsciiBytes(tl);
+                            byte[] trBytes = AsciiConverter.CompressAsciiBytes(tr);
+                            byte[] blBytes = AsciiConverter.CompressAsciiBytes(bl);
+                            byte[] brBytes = AsciiConverter.CompressAsciiBytes(br);
 
-                            return (tlComp, trComp, blComp, brComp, isColorLocal);
+                            return (tlBytes, trBytes, blBytes, brBytes, isColorLocal);
                         }
                         catch (Exception ex)
                         {
@@ -902,26 +906,25 @@ namespace CCTVCapture
                 if (singleTask != null)
                 {
                     var result = singleTask.Result;
-                    string singleFrameCommand = $"FRAME {effectiveSingleRes} {effectiveSingleRes} {result.mode} {result.compressed}";
 
                     if (shouldLog)
-                        Console.WriteLine($">> FRAME {effectiveSingleRes} {effectiveSingleRes} {result.mode} ... ({singleFrameCommand.Length} bytes) [Single LCD]");
+                        Console.WriteLine($">> FRAME {effectiveSingleRes}\u00d7{effectiveSingleRes} flags=0x{result.flags:X2} ({result.gzBytes.Length} bytes) [Single LCD]");
 
-                    _writer.WriteLine(singleFrameCommand);
+                    SendFrameBinary(effectiveSingleRes, effectiveSingleRes, result.flags, result.gzBytes);
                 }
 
                 if (gridTask != null)
                 {
-                    var (tlComp, trComp, blComp, brComp, isColorResult) = gridTask.Result;
-                    string colorMode = isColorResult ? "COLOR" : "GRAY";
+                    var (tlBytes, trBytes, blBytes, brBytes, isColorResult) = gridTask.Result;
+                    byte colorFlag = isColorResult ? CCTVCommon.BinaryProtocol.FLAG_COLOR : (byte)0;
 
                     if (shouldLog)
-                        Console.WriteLine($">> QUAD TL/TR/BL/BR {colorMode} [{tlComp.Length + trComp.Length + blComp.Length + brComp.Length} bytes total] [Grid]");
+                        Console.WriteLine($">> QUAD TL/TR/BL/BR color={isColorResult} [{tlBytes.Length + trBytes.Length + blBytes.Length + brBytes.Length} bytes total] [Grid]");
 
-                    _writer.WriteLine($"QUAD TL {colorMode} {tlComp}");
-                    _writer.WriteLine($"QUAD TR {colorMode} {trComp}");
-                    _writer.WriteLine($"QUAD BL {colorMode} {blComp}");
-                    _writer.WriteLine($"QUAD BR {colorMode} {brComp}");
+                    SendQuadBinary(CCTVCommon.BinaryProtocol.QUAD_TL, colorFlag, tlBytes);
+                    SendQuadBinary(CCTVCommon.BinaryProtocol.QUAD_TR, colorFlag, trBytes);
+                    SendQuadBinary(CCTVCommon.BinaryProtocol.QUAD_BL, colorFlag, blBytes);
+                    SendQuadBinary(CCTVCommon.BinaryProtocol.QUAD_BR, colorFlag, brBytes);
                 }
 
                 // Clean up resized bitmaps
@@ -941,8 +944,8 @@ namespace CCTVCapture
                     if (_useColorMode && _desaturateColorMode)
                         AsciiConverter.DesaturateBitmap(fallbackSrc, _nightVisionMode);
 
-                    string compressed;
-                    string frameMode;
+                    byte[] gzBytes;
+                    byte flags;
 
                     if (_useColorMode)
                     {
@@ -959,8 +962,8 @@ namespace CCTVCapture
                                 colorChars = AsciiConverter.ConvertToColorChars(fallbackSrc, _captureWidth, _captureHeight);
                                 break;
                         }
-                        compressed = AsciiConverter.CompressAscii(colorChars);
-                        frameMode = "COLORGZ";
+                        gzBytes = AsciiConverter.CompressAsciiBytes(colorChars);
+                        flags = (byte)(CCTVCommon.BinaryProtocol.FLAG_COLOR | CCTVCommon.BinaryProtocol.FLAG_GZ);
                     }
                     else
                     {
@@ -977,16 +980,14 @@ namespace CCTVCapture
                                 ascii = AsciiConverter.ConvertToAscii(fallbackSrc, _captureWidth, _captureHeight, useBlockMode: true);
                                 break;
                         }
-                        compressed = AsciiConverter.CompressAscii(ascii);
-                        frameMode = "GRAYGZ";
+                        gzBytes = AsciiConverter.CompressAsciiBytes(ascii);
+                        flags = CCTVCommon.BinaryProtocol.FLAG_GZ;
                     }
 
-                    string frameCommand = $"FRAME {_captureWidth} {_captureHeight} {frameMode} {compressed}";
-
                     if (shouldLog)
-                        Console.WriteLine($">> FRAME {_captureWidth} {_captureHeight} {frameMode} ... ({frameCommand.Length} bytes) [Legacy]");
+                        Console.WriteLine($">> FRAME {_captureWidth}×{_captureHeight} flags=0x{flags:X2} ({gzBytes.Length} bytes) [Legacy]");
 
-                    _writer.WriteLine(frameCommand);
+                    SendFrameBinary(_captureWidth, _captureHeight, flags, gzBytes);
                     fallbackProcessed?.Dispose();
                 }
 
@@ -1162,6 +1163,47 @@ namespace CCTVCapture
                     sb.Append('\n');
             }
             return sb.ToString();
+        }
+
+        static void SendText(string message)
+        {
+            CCTVCommon.BinaryProtocol.WriteTextFrame(_stream, message);
+        }
+
+        static string ReadOneBinaryTextFrame()
+        {
+            var (type, len) = CCTVCommon.BinaryProtocol.ReadHeader(_stream);
+            byte[] buf = new byte[Math.Max(len, 1)];
+            if (len > 0)
+                CCTVCommon.BinaryProtocol.ReadExactly(_stream, buf, 0, len);
+            return type == CCTVCommon.BinaryProtocol.MSG_TEXT
+                ? Encoding.UTF8.GetString(buf, 0, len)
+                : null;
+        }
+
+        static void SendFrameBinary(int width, int height, byte flags, byte[] gzBytes)
+        {
+            byte[] payload = new byte[9 + gzBytes.Length];
+            payload[0] = (byte)( width         & 0xFF);
+            payload[1] = (byte)((width  >>  8) & 0xFF);
+            payload[2] = (byte)((width  >> 16) & 0xFF);
+            payload[3] = (byte)((width  >> 24) & 0xFF);
+            payload[4] = (byte)( height         & 0xFF);
+            payload[5] = (byte)((height >>  8) & 0xFF);
+            payload[6] = (byte)((height >> 16) & 0xFF);
+            payload[7] = (byte)((height >> 24) & 0xFF);
+            payload[8] = flags;
+            Buffer.BlockCopy(gzBytes, 0, payload, 9, gzBytes.Length);
+            CCTVCommon.BinaryProtocol.WriteFrame(_stream, CCTVCommon.BinaryProtocol.MSG_FRAME, payload, 0, payload.Length);
+        }
+
+        static void SendQuadBinary(byte quadId, byte colorFlag, byte[] gzBytes)
+        {
+            byte[] payload = new byte[2 + gzBytes.Length];
+            payload[0] = quadId;
+            payload[1] = colorFlag;
+            Buffer.BlockCopy(gzBytes, 0, payload, 2, gzBytes.Length);
+            CCTVCommon.BinaryProtocol.WriteFrame(_stream, CCTVCommon.BinaryProtocol.MSG_QUAD, payload, 0, payload.Length);
         }
     }
 }

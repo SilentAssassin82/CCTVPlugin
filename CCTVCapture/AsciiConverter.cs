@@ -1143,6 +1143,31 @@ namespace CCTVCapture
         }
 
         /// <summary>
+        /// GZip-compresses ASCII art and returns the raw compressed bytes (no base64).
+        /// Reuses the same per-thread MemoryStream and UTF-8 buffer as CompressAscii.
+        /// </summary>
+        public static byte[] CompressAsciiBytes(string ascii)
+        {
+            int maxBytes = Encoding.UTF8.GetMaxByteCount(ascii.Length);
+            if (_utf8Buf == null || _utf8Buf.Length < maxBytes)
+                _utf8Buf = new byte[maxBytes];
+            int byteCount = Encoding.UTF8.GetBytes(ascii, 0, ascii.Length, _utf8Buf, 0);
+
+            if (_compressMs == null)
+                _compressMs = new MemoryStream(maxBytes);
+            else
+                _compressMs.SetLength(0);
+
+            using (var gz = new GZipStream(_compressMs, CompressionLevel.Fastest, leaveOpen: true))
+                gz.Write(_utf8Buf, 0, byteCount);
+
+            // Copy out — caller owns this array; _compressMs will be overwritten on next call
+            byte[] result = new byte[(int)_compressMs.Length];
+            Buffer.BlockCopy(_compressMs.GetBuffer(), 0, result, 0, result.Length);
+            return result;
+        }
+
+        /// <summary>
         /// Decompresses a GZip+base64 encoded ASCII art string.
         /// </summary>
         public static string DecompressAscii(string base64)
