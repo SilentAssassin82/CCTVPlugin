@@ -120,12 +120,15 @@ namespace CCTVPlugin
 		// execute inline instead of deadlocking via InvokeBlocking.
 		private int _gameThreadId = -1;
 
-		// Deferred GOTO queue: TeleportToCamera enqueues the SendMessageTo action
-		// instead of executing it inline.  Update() drains this queue at the start
-		// of the NEXT tick so the game thread never blocks mid-call-stack on Steam
-		// P2P networking (the root cause of the intermittent server hangs visible
-		// in the Windows Wait Chain as "waiting to finish network I/O").
-		private readonly ConcurrentQueue<Action> _pendingGotoActions = new ConcurrentQueue<Action>();
+		// Deferred GOTO: TeleportToCamera stores the SendMessageTo action here instead
+		// of executing it inline.  Update() fires it at the top of the NEXT tick so the
+		// game thread never blocks mid-call-stack on Steam P2P networking (root cause of
+		// the intermittent server hangs visible in the Windows Wait Chain as "waiting to
+		// finish network I/O").  Only the MOST RECENT action is kept — if several camera
+		// switches happen between ticks (rapid button presses), stale intermediate GOTOs
+		// are discarded and only the final target camera is sent.  This caps SendMessageTo
+		// calls at 1 per game tick regardless of how quickly cameras are switched.
+		private Action _latestGotoAction;
 
 		// Proximity gate: skip LCD writes when no players are nearby.
 		// CCTVCapture keeps streaming; frames are drained and discarded until a player returns.
@@ -621,7 +624,7 @@ namespace CCTVPlugin
 		{
 			if (!_isRunning) return;
 
-			_sendQueue.Enqueue(Encoding.UTF8.GetBytes(message + "\n"));
+			_sendQueue.Enqueue(CCTVCommon.BinaryProtocol.CreateTextFrame(message));
 
 			// Cap queue to prevent unbounded growth when client isn't reading
 			while (_sendQueue.Count > MAX_SEND_QUEUE)
@@ -695,6 +698,17 @@ namespace CCTVPlugin
 						candidate.NoDelay = true;
 						candidate.SendTimeout = 2000; // 2s — prevents game thread from blocking indefinitely on Write()
 
+						// Enable KeepAlive so the OS detects silently-dropped TCP connections
+						// (e.g. CCTVCapture.exe process killed without sending RST).
+						// Combined with ReceiveTimeout this means both half-open and stalled connections
+						// are cleaned up within 30-90 seconds.
+						candidate.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+						byte[] kaValues = new byte[12];
+						BitConverter.GetBytes(1).CopyTo(kaValues, 0);        // on
+						BitConverter.GetBytes(30000).CopyTo(kaValues, 4);    // 30s idle before first probe
+						BitConverter.GetBytes(5000).CopyTo(kaValues, 8);     // 5s between probes
+						candidate.Client.IOControl(IOControlCode.KeepAliveValues, kaValues, null);
+
 						var candidateStream = candidate.GetStream();
 
 						// --- HMAC challenge-response handshake ---
@@ -726,7 +740,10 @@ namespace CCTVPlugin
 						}
 						finally
 						{
-							candidate.ReceiveTimeout = 0; // reset to infinite
+							// 30s safety net: if CCTVCapture stops sending (hung/crashed without RST),
+							// ReadExactly in HandleClientMessages will throw SocketException(TimedOut)
+							// after 30s, cleanly exiting the handler thread so reconnection is possible.
+							candidate.ReceiveTimeout = 30000;
 						}
 
 						if (authLine == null || !authLine.StartsWith("AUTH ") || authLine.Substring(5).Trim() != expectedHmac)
@@ -838,6 +855,7 @@ namespace CCTVPlugin
 		/// <summary>
 		/// Handle incoming messages from the connected CCTVCapture.
 		/// Runs on dedicated background thread per client.
+		/// Binary framing: [4B type][4B payloadLen][payload].
 		/// </summary>
 		private void HandleClientMessages()
 		{
@@ -846,35 +864,77 @@ namespace CCTVPlugin
 			// this handler was still shutting down.
 			var myClient = _client;
 			var myStream = _stream;
+			var myEndpoint = myClient?.Client?.RemoteEndPoint?.ToString() ?? "unknown";
+			var connectedAt = DateTime.UtcNow;
+
+			Log.Info($"[{Name}] Handler started for {myEndpoint}");
+
+			byte[] recvBuf = null;
 
 			try
 			{
-				// 🔧 CRITICAL FIX: Use larger buffer for StreamReader to handle 500KB FRAME messages
-				using (StreamReader reader = new StreamReader(myStream, Encoding.UTF8, false, 1024 * 1024)) // 1 MB buffer
+				while (_isRunning && myClient != null && myClient.Connected)
 				{
-					string line;
-					while (_isRunning && myClient != null && myClient.Connected && (line = reader.ReadLine()) != null)
+					uint   type;
+					int    payloadLen;
+					try
 					{
-						try
+						(type, payloadLen) = CCTVCommon.BinaryProtocol.ReadHeader(myStream);
+					}
+					catch (EndOfStreamException)
+					{
+						break; // clean disconnect
+					}
+
+					// Grow receive buffer on demand
+					if (payloadLen > 0)
+					{
+						if (recvBuf == null || recvBuf.Length < payloadLen)
+							recvBuf = new byte[Math.Max(payloadLen, 65536)];
+						CCTVCommon.BinaryProtocol.ReadExactly(myStream, recvBuf, 0, payloadLen);
+					}
+
+					try
+					{
+						if (type == CCTVCommon.BinaryProtocol.MSG_TEXT)
 						{
-							ProcessClientMessage(line.Trim());
+							string message = payloadLen > 0
+								? Encoding.UTF8.GetString(recvBuf, 0, payloadLen)
+								: string.Empty;
+							ProcessClientMessage(message);
 						}
-						catch (Exception ex)
+						else if (type == CCTVCommon.BinaryProtocol.MSG_FRAME)
 						{
-							Log.Error(ex, $"[{Name}] Error processing message: {line?.Substring(0, Math.Min(100, line?.Length ?? 0))}...");
+							ProcessBinaryFrame(recvBuf, payloadLen);
 						}
+						else if (type == CCTVCommon.BinaryProtocol.MSG_QUAD)
+						{
+							ProcessBinaryQuad(recvBuf, payloadLen);
+						}
+						else
+						{
+							Log.Warn($"[{Name}] Unknown binary frame type {type} ({payloadLen} bytes) — ignoring");
+						}
+					}
+					catch (Exception ex)
+					{
+						Log.Error(ex, $"[{Name}] Error processing binary frame type {type} ({payloadLen} bytes)");
 					}
 				}
 
-				Log.Info($"[{Name}] Client disconnected");
+				Log.Info($"[{Name}] Client disconnected cleanly after {(DateTime.UtcNow - connectedAt).TotalSeconds:F0}s");
 			}
-			catch (IOException ex) when (ex.InnerException is SocketException)
+			catch (IOException ex) when (ex.InnerException is SocketException se)
 			{
-				Log.Info($"[{Name}] Client disconnected (connection forcibly closed)");
+				var duration = $"{(DateTime.UtcNow - connectedAt).TotalSeconds:F0}s";
+				if (se.SocketErrorCode == SocketError.TimedOut)
+					Log.Warn($"[{Name}] ⚠️ Receive timeout after {duration} — CCTVCapture stopped sending (hung or stalled). Disconnecting.");
+				else
+					Log.Info($"[{Name}] Client disconnected (connection reset) after {duration}");
 			}
 			catch (Exception ex)
 			{
-				Log.Error(ex, $"[{Name}] Error in client handler thread");
+				Log.Error(ex, $"[{Name}] Error in client handler thread after {(DateTime.UtcNow - connectedAt).TotalSeconds:F0}s");
 			}
 			finally
 			{
@@ -891,7 +951,155 @@ namespace CCTVPlugin
 		}
 
 		/// <summary>
-		/// Process a single message from the CCTVCapture.
+		/// Processes a MSG_FRAME binary payload: [4B width][4B height][1B flags][gzip bytes].
+		/// Decompresses and queues to _frameQueue for the game thread.
+		/// </summary>
+		private void ProcessBinaryFrame(byte[] payload, int payloadLen)
+		{
+			if (payloadLen < 9)
+			{
+				Log.Warn($"[{Name}] ⚠️ MSG_FRAME too short ({payloadLen} bytes)");
+				return;
+			}
+			int  width   = BitConverter.ToInt32(payload, 0);
+			int  height  = BitConverter.ToInt32(payload, 4);
+			byte flags   = payload[8];
+			bool isColor = (flags & CCTVCommon.BinaryProtocol.FLAG_COLOR) != 0;
+			bool isGz    = (flags & CCTVCommon.BinaryProtocol.FLAG_GZ)    != 0;
+			int  gzLen   = payloadLen - 9;
+
+			if (_decompressMs == null)
+				_decompressMs = new MemoryStream(gzLen * 4);
+			else
+				_decompressMs.SetLength(0);
+
+			string decodedContent;
+			if (isGz && gzLen > 0)
+			{
+				using (var ms = new MemoryStream(payload, 9, gzLen))
+				using (var gz = new GZipStream(ms, CompressionMode.Decompress))
+				{
+					gz.CopyTo(_decompressMs);
+					decodedContent = Encoding.UTF8.GetString(_decompressMs.GetBuffer(), 0, (int)_decompressMs.Length);
+				}
+			}
+			else
+			{
+				decodedContent = Encoding.UTF8.GetString(payload, 9, gzLen);
+			}
+
+			Interlocked.Increment(ref _framesReceived);
+			lock (_frameQueueLock)
+			{
+				_frameQueue.Enqueue((width, height, decodedContent, isColor));
+				while (_frameQueue.Count > 5)
+				{
+					_frameQueue.Dequeue();
+					Log.Warn($"[{Name}] ⚠️ Frame queue overflow - dropped oldest frame");
+				}
+			}
+
+			if (_awaitingFirstFrameAfterSwitch && _lastCameraSwitchTime != DateTime.MinValue)
+			{
+				_awaitingFirstFrameAfterSwitch = false;
+				float settleMs = (float)(DateTime.UtcNow - _lastCameraSwitchTime).TotalMilliseconds;
+				if (settleMs > MAX_SETTLE_EWMA_MS)
+				{
+					Log.Info($"[{Name}] 📊 Settle outlier discarded: {settleMs:F0}ms (cap {MAX_SETTLE_EWMA_MS:F0}ms)");
+					settleMs = MAX_SETTLE_EWMA_MS;
+				}
+				_settleTimeObservations++;
+				if (_settleTimeObservations == 1)
+					_settleTimeEwmaMs = settleMs;
+				else
+					_settleTimeEwmaMs = _settleTimeEwmaMs * (1f - SETTLE_EWMA_ALPHA) + settleMs * SETTLE_EWMA_ALPHA;
+				if (_settleTimeObservations >= MIN_OBSERVATIONS)
+				{
+					int newTicks = (int)(_settleTimeEwmaMs / 1000f * 60f * SETTLE_SAFETY_FACTOR);
+					int oldTicks = _dynamicCycleIntervalTicks;
+					_dynamicCycleIntervalTicks = Math.Max(_cameraCycleIntervalTicks, Math.Min(MAX_CYCLE_TICKS, newTicks));
+					if (Math.Abs(oldTicks - _dynamicCycleIntervalTicks) > 30)
+						Log.Info($"[{Name}] 📊 Settle: {settleMs:F0}ms (EWMA {_settleTimeEwmaMs:F0}ms) → cycle {_dynamicCycleIntervalTicks / 60f:F1}s");
+				}
+			}
+
+			Log.Debug($"[{Name}] ✅ Queued FRAME {width}×{height} ({decodedContent.Length} chars, queue: {_frameQueue.Count})");
+		}
+
+		/// <summary>
+		/// Processes a MSG_QUAD binary payload: [1B quadId (0-3)][1B colorFlag][gzip bytes].
+		/// Decompresses and stages into the quad frame buffer for the game thread.
+		/// </summary>
+		private void ProcessBinaryQuad(byte[] payload, int payloadLen)
+		{
+			if (payloadLen < 2)
+			{
+				Log.Warn($"[{Name}] ⚠️ MSG_QUAD too short ({payloadLen} bytes)");
+				return;
+			}
+			byte quadId  = payload[0];
+			bool isColor = payload[1] != 0;
+			int  gzLen   = payloadLen - 2;
+
+			if (_decompressMs == null)
+				_decompressMs = new MemoryStream(gzLen * 4);
+			else
+				_decompressMs.SetLength(0);
+
+			using (var ms = new MemoryStream(payload, 2, gzLen))
+			using (var gz = new GZipStream(ms, CompressionMode.Decompress))
+				gz.CopyTo(_decompressMs);
+
+			string quadContent = Encoding.UTF8.GetString(_decompressMs.GetBuffer(), 0, (int)_decompressMs.Length);
+
+			string quadName;
+			switch (quadId)
+			{
+				case CCTVCommon.BinaryProtocol.QUAD_TL: quadName = "TL"; break;
+				case CCTVCommon.BinaryProtocol.QUAD_TR: quadName = "TR"; break;
+				case CCTVCommon.BinaryProtocol.QUAD_BL: quadName = "BL"; break;
+				case CCTVCommon.BinaryProtocol.QUAD_BR: quadName = "BR"; break;
+				default:
+					Log.Warn($"[{Name}] ⚠️ MSG_QUAD unknown quadrant id {quadId}");
+					return;
+			}
+
+			lock (_frameQueueLock)
+			{
+				switch (quadId)
+				{
+					case CCTVCommon.BinaryProtocol.QUAD_TL:
+						_stagingQuadTL = quadContent;
+						_stagingQuadIsColor = isColor;
+						break;
+					case CCTVCommon.BinaryProtocol.QUAD_TR:
+						_stagingQuadTR = quadContent;
+						break;
+					case CCTVCommon.BinaryProtocol.QUAD_BL:
+						_stagingQuadBL = quadContent;
+						break;
+					case CCTVCommon.BinaryProtocol.QUAD_BR:
+						_stagingQuadBR = quadContent;
+						if (_stagingQuadTL != null && _stagingQuadTR != null && _stagingQuadBL != null)
+						{
+							_pendingQuadTL      = _stagingQuadTL;
+							_pendingQuadTR      = _stagingQuadTR;
+							_pendingQuadBL      = _stagingQuadBL;
+							_pendingQuadBR      = _stagingQuadBR;
+							_pendingQuadIsColor = _stagingQuadIsColor;
+							_hasPendingQuadFrame = true;
+							_stagingQuadTL = _stagingQuadTR = _stagingQuadBL = _stagingQuadBR = null;
+							Interlocked.Increment(ref _framesReceived);
+						}
+						break;
+				}
+			}
+
+			Log.Debug($"[{Name}] ✅ QUAD {quadName} decoded ({quadContent.Length} chars)");
+		}
+
+		/// <summary>
+		/// Process a single text message from the CCTVCapture (received via MSG_TEXT frame).
 		/// </summary>
 		private void ProcessClientMessage(string message)
 		{
@@ -1275,10 +1483,11 @@ namespace CCTVPlugin
 			if (_gameThreadId == -1)
 				_gameThreadId = Thread.CurrentThread.ManagedThreadId;
 
-			// Drain deferred GOTO actions (SendMessageTo).  These were queued by
-			// TeleportToCamera so the game thread never blocks on Steam P2P I/O
-			// inside a nested call (CycleToNextCamera → TeleportToCamera → SendMessageTo).
-			while (_pendingGotoActions.TryDequeue(out var gotoAction))
+			// Fire the latest deferred GOTO (if any).  Interlocked.Exchange atomically
+			// takes ownership and clears the field so a concurrently-arriving TeleportToCamera
+			// call cannot race with this drain.
+			var gotoAction = Interlocked.Exchange(ref _latestGotoAction, null);
+			if (gotoAction != null)
 			{
 				try { gotoAction(); }
 				catch (Exception ex) { Log.Error(ex, $"[{Name}] Error executing deferred GOTO action"); }
@@ -1546,10 +1755,10 @@ namespace CCTVPlugin
 					}
 
 					Vector3D position = cameraEntity.WorldMatrix.Translation;
-					Vector3D forward = cameraEntity.WorldMatrix.Forward;
-					Vector3D up = cameraEntity.WorldMatrix.Up;
+						Vector3D forward = cameraEntity.WorldMatrix.Forward;
+						Vector3D up = cameraEntity.WorldMatrix.Up;
 
-					// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
+						// Format: GOTO|SteamID|CameraName|EntityID|X|Y|Z|FwdX|FwdY|FwdZ|UpX|UpY|UpZ
 					var ic = CultureInfo.InvariantCulture;
 					string gotoMessage = $"GOTO|{steamId}|{displayName}|{entityId}|" +
 									$"{position.X.ToString(ic)}|{position.Y.ToString(ic)}|{position.Z.ToString(ic)}|" +
@@ -1576,7 +1785,9 @@ namespace CCTVPlugin
 			// inside CycleToNextCamera / UpdateCameras / ManualSwitch blocks the entire
 			// game thread mid-call-stack (the root cause of the server hangs visible
 			// in the Windows Wait Chain as "waiting to finish network I/O").
-			_pendingGotoActions.Enqueue(sendGoto);
+			// Overwrite any previously queued GOTO — only the most recent camera target
+			// needs to fire.  Interlocked.Exchange makes this thread-safe without a lock.
+			Interlocked.Exchange(ref _latestGotoAction, sendGoto);
 		}
 
 		/// <summary>
