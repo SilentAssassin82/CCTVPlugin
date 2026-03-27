@@ -113,8 +113,11 @@ namespace CCTVPlugin
 		// Invalidated by InvalidateLcdCache() on every camera rescan.
 		private readonly Dictionary<string, IMyTextPanel> _lcdCache =
 		new Dictionary<string, IMyTextPanel>(StringComparer.OrdinalIgnoreCase);
-		private Dictionary<string, List<IMyTextPanel>> _cachedSlavesByQuad;
-		private string _cachedSlavesKey;
+		// Keyed by "{lcdPrefix}|{baseName}" — entries survive camera switches and are
+		// only cleared on full LCD rescan so each camera's slave list is discovered once
+		// per rescan cycle rather than once per camera switch.
+		private readonly Dictionary<string, Dictionary<string, List<IMyTextPanel>>> _slaveCache
+			= new Dictionary<string, Dictionary<string, List<IMyTextPanel>>>(StringComparer.OrdinalIgnoreCase);
 
 		// Game thread ID — captured on first Update() call so TeleportToCamera can
 		// execute inline instead of deadlocking via InvokeBlocking.
@@ -2444,12 +2447,7 @@ namespace CCTVPlugin
 			string[] quadrants = { "_TL", "_TR", "_BL", "_BR" };
 			string cacheKey = $"{lcdPrefix}|{baseName}";
 
-			Dictionary<string, List<IMyTextPanel>> slavesByQuad;
-			if (_cachedSlavesKey == cacheKey && _cachedSlavesByQuad != null)
-			{
-				slavesByQuad = _cachedSlavesByQuad;
-			}
-			else
+			if (!_slaveCache.TryGetValue(cacheKey, out var slavesByQuad))
 			{
 				// Build master name → quadrant tag lookup (case-insensitive keys)
 				var masterPrefixes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -2520,8 +2518,7 @@ namespace CCTVPlugin
 					}
 					catch (InvalidOperationException) { } // entity list changed mid-scan
 
-				_cachedSlavesByQuad = slavesByQuad;
-				_cachedSlavesKey = cacheKey;
+				_slaveCache[cacheKey] = slavesByQuad;
 			}
 
 			if (slavesByQuad.Count == 0)
@@ -2711,8 +2708,7 @@ namespace CCTVPlugin
 		public void InvalidateLcdCache()
 		{
 			_lcdCache.Clear();
-			_cachedSlavesByQuad = null;
-			_cachedSlavesKey = null;
+			_slaveCache.Clear();
 			// NOTE: cockpit cache is NOT invalidated here.  Cockpit block references
 			// remain valid across LCD name changes; only MarkedForClose invalidates them.
 			// Clearing it here caused a deadlock: _lcdCache empty → dynamic grids unknown
@@ -2751,9 +2747,10 @@ namespace CCTVPlugin
 			}
 
 			// Also flush any slave panels
-			if (_cachedSlavesByQuad != null)
+			if (_slaveCache.Count > 0)
 			{
-				foreach (var slaves in _cachedSlavesByQuad.Values)
+				foreach (var slavesByQuad in _slaveCache.Values)
+				foreach (var slaves in slavesByQuad.Values)
 				{
 					foreach (var lcd in slaves)
 					{
@@ -2835,12 +2832,13 @@ namespace CCTVPlugin
 				catch { }
 			}
 
-			// Include slave LCD positions — they live in _cachedSlavesByQuad, not
+			// Include slave LCD positions — they live in _slaveCache, not
 			// _lcdCache, so without this a player near a slave but far from the
 			// master would fail the proximity check and all writes would stop.
-			if (_cachedSlavesByQuad != null)
+			if (_slaveCache.Count > 0)
 			{
-				foreach (var slaves in _cachedSlavesByQuad.Values)
+				foreach (var slavesByQuad in _slaveCache.Values)
+				foreach (var slaves in slavesByQuad.Values)
 				{
 					foreach (var slaveLcd in slaves)
 					{
@@ -2998,9 +2996,9 @@ namespace CCTVPlugin
 		{
 			try
 			{
-				if (_cachedSlavesByQuad == null || _cachedSlavesByQuad.Count == 0)
+				if (_slaveCache.Count == 0)
 				{
-					Log.Info($"[{Name}] 🔍 Antenna check: No slave LCDs found (_cachedSlavesByQuad={((_cachedSlavesByQuad == null) ? "null" : "empty")}) — allowing stream");
+					Log.Info($"[{Name}] 🔍 Antenna check: No slave LCDs found (slaveCache empty) — allowing stream");
 					return true; // No slaves = no antenna requirement
 				}
 
@@ -3058,7 +3056,8 @@ namespace CCTVPlugin
 				var slaveLcdBaseGrids = new HashSet<long>(); // Grids that have slave LCDs
 				var slaveLcdBaseGridsWithCoverage = new HashSet<long>(); // Base grids that have antenna coverage
 
-				foreach (var slaves in _cachedSlavesByQuad.Values)
+				foreach (var slavesByQuad in _slaveCache.Values)
+				foreach (var slaves in slavesByQuad.Values)
 				{
 					foreach (var slaveLcd in slaves)
 					{
@@ -3110,7 +3109,7 @@ namespace CCTVPlugin
 					}
 				}
 
-				Log.Info($"[{Name}] 🔍 Antenna check: Slave {slaveLcdBaseGrids.Count} LCD grid(s), {slaveAnts.Count} antenna(s) from {_cachedSlavesByQuad.Count} cached quadrant group(s)");
+				Log.Info($"[{Name}] 🔍 Antenna check: Slave {slaveLcdBaseGrids.Count} LCD grid(s), {slaveAnts.Count} antenna(s) from {_slaveCache.Count} cached camera(s)");
 
 				if (masterAnts.Count == 0)
 				{
@@ -3148,9 +3147,10 @@ namespace CCTVPlugin
 						{
 							rangeChecksPassed++;
 							// Find which slave LCD base grid this antenna belongs to
-							foreach (var kvp in _cachedSlavesByQuad)
+							foreach (var slavesByQuad in _slaveCache.Values)
+							foreach (var slaves in slavesByQuad.Values)
 							{
-								foreach (var slaveLcd in kvp.Value)
+								foreach (var slaveLcd in slaves)
 								{
 									try
 									{
@@ -3291,11 +3291,12 @@ namespace CCTVPlugin
 			}
 
 			// Blank slave LCDs too — they bypass WriteLCDContent entirely
-			if (_cachedSlavesByQuad != null)
+			if (_slaveCache.Count > 0)
 			{
-				foreach (var kvp in _cachedSlavesByQuad)
+				foreach (var slavesByQuad in _slaveCache.Values)
+				foreach (var slaves in slavesByQuad.Values)
 				{
-					foreach (var slaveLcd in kvp.Value)
+					foreach (var slaveLcd in slaves)
 					{
 						try
 						{
