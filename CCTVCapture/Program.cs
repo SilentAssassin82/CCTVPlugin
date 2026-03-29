@@ -690,10 +690,12 @@ namespace CCTVCapture
                 if (capture == null)
                 {
                     // Graphics subsystem unavailable — SE may be reconnecting or driver busy.
-                    // Back off exponentially: 500ms → 1s → 2s → 4s (capped) to avoid
-                    // hammering the GPU during DirectX surface rebuilds.
+                    // Back off exponentially: 500ms → 1s → 2s → 4s → 8s → 16s → 30s (capped).
+                    // A full SE rejoin can take 30-60s; the old 4s cap allowed ~10-15 calls into
+                    // a broken GPU pipeline, which is enough to trigger a TDR driver crash.
+                    // After ~7 failures the interval reaches 30s, giving the driver time to recover.
                     _consecutiveCaptureFailures++;
-                    _captureBackoffMs = Math.Min(4000, 500 * (1 << Math.Min(_consecutiveCaptureFailures - 1, 3)));
+                    _captureBackoffMs = Math.Min(30000, 500 * (1 << Math.Min(_consecutiveCaptureFailures - 1, 6)));
 
                     if ((DateTime.Now - _lastCaptureBackoffLog).TotalSeconds >= 5)
                     {

@@ -46,11 +46,13 @@ namespace CCTVCapture
 
                 return bitmap;
             }
-            catch (ExternalException)
+            catch (Exception)
             {
-                // GDI+ failure — graphics driver busy or surfaces being rebuilt (SE reconnecting).
-                // Also covers Win32Exception (subclass of ExternalException).
-                // Return null so the caller can back off instead of crashing the driver.
+                // GDI+ failure during DirectX surface rebuild (SE reconnecting/rejoining).
+                // ExternalException covers most GDI errors; OutOfMemoryException is also thrown
+                // by GDI+ for driver failures (not actual OOM). Catching Exception broadly
+                // ensures all paths return null and feed the backoff counter rather than
+                // propagating into the GPU driver and triggering a TDR.
                 return null;
             }
         }
