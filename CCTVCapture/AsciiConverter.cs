@@ -17,11 +17,22 @@ namespace CCTVCapture
         private const int SE_COLOR_BASE = 0xE100;
         private const double BIT_SPACING = 255.0 / 7.0; // 36.428 - quantize 0-255 to 0-7
 
-        // ASCII character ramp ordered by visual density on SE LCDs.
-        // 11 levels for finer gradation; all standard ASCII (1 byte UTF-8).
+        // Character ramp ordered by visual density on SE LCDs.
+        // All characters confirmed present in SE Monospace FontDataPA.xml (aw=24, size=30x42).
+        // Block elements ░▒▓█ (U+2591–2593, U+2588) have white DDS pixels → tint correctly.
+        // ■ (U+25A0) is a solid square (density estimated ~82 %).
+        // \uE033 (U+E033) is a PUA grid glyph confirmed tintable (white alpha-mask DDS) by
+        //   in-game comparison test: colour changes with font colour → white mask.
+        //   Fills the 15 %→25 % gap in the ramp.  Density estimated ~19 % from visual inspection.
+        // ☻ (U+263B BLACK SMILING FACE) confirmed tintable (white alpha-mask DDS) by
+        //   in-game cyan-vs-white panel test.  Fills the ▒→▓ gap.  Density estimated ~65 %
+        //   from in-game comparison (visually close to ▓ but slightly lighter).
+        //   Adjust 0.65f if banding is visible at the ▒→☻ or ☻→▓ transitions.
+        // ASCII chars cover the 0–15 % dark end for fine shadow detail.
+        // █ (U+2588 FULL BLOCK) reaches true 100 % fill; the old all-ASCII ramp peaked at ~92 %.
         private static readonly char[] WHIP_RAMP = new char[]
         {
-            ' ', '.', '*', '!', 'v', 'n', 'z', 'm', '#', 'W', '@'
+            ' ', '.', '*', '!', '\uE033', '░', '▒', '\u263B', '▓', '■', '█'
         };
 
         // Alternative rich ramp with more gradations
@@ -132,14 +143,19 @@ namespace CCTVCapture
         private const float GRAYSCALE_GAMMA = 0.8f;
 
         // Approximate visual density of each WHIP_RAMP character on SE LCDs
-        // (0 = empty, 1 = full block).  Block elements ░▒▓█ are standardised at
-        // 25%/50%/75%/100% fill; dot characters ·˙° are estimated from their
-        // rendered glyph area at typical LCD font sizes.
+        // (0 = empty, 1 = full block).  Block elements ░▒▓█ are IEEE-standardised at
+        // exactly 25 %/50 %/75 %/100 % pixel fill.  ■ (U+25A0) is a solid square
+        // estimated at ~82 % (DDS not pixel-inspected; adjust if banding is visible
+        // at the ▓→■ or ■→█ transitions after in-game testing).
+        // \uE033: visually estimated ~19 % from in-game close-up; tintability confirmed
+        //   via cyan-vs-white panel test (glyph colour changed = white alpha-mask DDS).
+        //   Adjust the 0.19f if a brightness step is visible at the !→E033 or E033→░ boundary.
+        // ASCII densities ('.', '*', '!') are estimated from glyph geometry.
         // These drive the density-linearized LUTs below so that equal brightness
         // intervals produce equal apparent density changes on the LCD — eliminating
-        // the visible banding artefact at the °→░ transition caused by linear mapping.
+        // visible banding artefacts caused by linear mapping.
         private static readonly float[] WHIP_DENSITY =
-            { 0.00f, 0.04f, 0.10f, 0.15f, 0.25f, 0.35f, 0.45f, 0.55f, 0.65f, 0.78f, 0.92f };
+            { 0.00f, 0.04f, 0.10f, 0.15f, 0.19f, 0.25f, 0.50f, 0.65f, 0.75f, 0.82f, 1.00f };
 
         // LUT: raw grayscale byte → gamma-lifted + contrast-boosted byte.
         // Applies the same shadow lift as the grayscale ASCII paths but outputs
@@ -1080,8 +1096,8 @@ namespace CCTVCapture
             resized.UnlockBits(bmpData);
             resized.Dispose();
 
-            int   rampLen   = WHIP_RAMP.Length; // 11
-            float rampScale = rampLen - 1;        // 10.0f  (one quantisation step = 1/10 in density-linear space)
+            int   rampLen   = WHIP_RAMP.Length;
+            float rampScale = rampLen - 1;
 
             StringBuilder result = RentStringBuilder((targetWidth + 1) * adjustedHeight);
 
